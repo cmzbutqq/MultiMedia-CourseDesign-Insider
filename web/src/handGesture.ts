@@ -80,59 +80,69 @@ export class HandGestureController {
 
       this.hands.setOptions({
         maxNumHands: 1,
-        modelComplexity: 1,
-        minDetectionConfidence: 0.5,
+        modelComplexity: 0,
+        minDetectionConfidence: 0.7,
         minTrackingConfidence: 0.5,
-      });
+      } as any);
 
       this.hands.onResults((results: Results) => this.onResults(results));
 
       let stream: MediaStream | null = null;
 
-      const mediaDevices = navigator.mediaDevices || (navigator as any);
-      const getUserMedia = mediaDevices?.getUserMedia?.bind(mediaDevices)
-        || (navigator as any).getUserMedia?.bind(navigator)
-        || (navigator as any).webkitGetUserMedia?.bind(navigator)
-        || (navigator as any).mozGetUserMedia?.bind(navigator);
+      console.log('[HandGesture] === 摄像头初始化开始 ===');
+      console.log('[HandGesture] navigator.mediaDevices:', navigator.mediaDevices);
+      console.log('[HandGesture] typeof navigator.mediaDevices:', typeof navigator.mediaDevices);
+      if (navigator.mediaDevices) {
+        console.log('[HandGesture] navigator.mediaDevices.getUserMedia:', (navigator.mediaDevices as any).getUserMedia);
+      }
+      console.log('[HandGesture] typeof navigator.mediaDevices?.getUserMedia:', typeof (navigator.mediaDevices as any)?.getUserMedia);
 
-      console.log('[HandGesture] navigator.mediaDevices 存在:', !!navigator.mediaDevices);
-      console.log('[HandGesture] getUserMedia 可用:', !!getUserMedia);
+      const getUserMedia = 
+        typeof navigator.mediaDevices?.getUserMedia === 'function'
+          ? navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices)
+          : typeof (navigator as any).getUserMedia === 'function'
+            ? (navigator as any).getUserMedia.bind(navigator)
+            : typeof (navigator as any).webkitGetUserMedia === 'function'
+              ? (navigator as any).webkitGetUserMedia.bind(navigator)
+              : typeof (navigator as any).mozGetUserMedia === 'function'
+                ? (navigator as any).mozGetUserMedia.bind(navigator)
+                : null;
+
+      console.log('[HandGesture] getUserMedia 函数:', getUserMedia);
+      console.log('[HandGesture] typeof getUserMedia:', typeof getUserMedia);
 
       if (!getUserMedia) {
-        const errMsg = '浏览器不支持 getUserMedia API (可能在 Docker/无头浏览器环境中运行)';
+        const errMsg = '浏览器不支持 getUserMedia API\n\n当前环境检测：\n- navigator.mediaDevices: ' + (!!navigator.mediaDevices) + '\n- navigator.getUserMedia: ' + (typeof (navigator as any).getUserMedia) + '\n\n可能原因：\n1. 在 Docker/无头浏览器环境中运行\n2. 浏览器不支持摄像头 API\n3. 需要 HTTPS 或 localhost\n\n解决方案：\n在宿主机浏览器中直接访问 http://localhost:5174';
+        
         console.error('[HandGesture]', errMsg);
-        alert(`${errMsg}\n\n手势控制功能需要访问摄像头，但在当前环境中不可用。\n\n解决方案：\n1. 在宿主机浏览器中直接访问页面\n2. 确保页面通过非 HTTPS 的 localhost 访问\n3. 确保浏览器允许摄像头权限`);
-        throw new Error(errMsg);
+        console.error('[HandGesture] 错误详情:', errMsg);
+        alert(errMsg);
+        throw new Error('浏览器不支持 getUserMedia API');
       }
 
       const constraints: MediaStreamConstraints = {
         video: {
-          width: { ideal: 320 },
-          height: { ideal: 240 },
-          facingMode: 'user',
+          width: { min: 160, ideal: 320, max: 640 },
+          height: { min: 120, ideal: 240, max: 480 },
+          frameRate: { ideal: 15, min: 10 },
         },
         audio: false,
       };
 
       try {
         console.log('[HandGesture] 正在请求摄像头权限...');
+        console.log('[HandGesture] 尝试约束:', JSON.stringify(constraints));
         stream = await getUserMedia(constraints);
         console.log('[HandGesture] 摄像头权限已获得');
       } catch (err) {
-        console.warn('[HandGesture] 前置摄像头失败，尝试后置摄像头...', err);
-        constraints.video = {
-          width: { ideal: 320 },
-          height: { ideal: 240 },
-          facingMode: 'environment',
-        };
+        console.warn('[HandGesture] 带约束的请求失败，尝试简化约束...', err);
         try {
-          stream = await getUserMedia(constraints);
-          console.log('[HandGesture] 后置摄像头权限已获得');
+          stream = await getUserMedia({ video: true, audio: false });
+          console.log('[HandGesture] 简化约束下摄像头权限已获得');
         } catch (err2) {
-          console.warn('[HandGesture] 后置摄像头也失败，尝试任意摄像头...', err2);
-          constraints.video = true;
-          stream = await getUserMedia(constraints);
-          console.log('[HandGesture] 任意摄像头权限已获得');
+          console.warn('[HandGesture] 简化约束也失败，尝试任意约束...', err2);
+          stream = await getUserMedia({ video: undefined, audio: false });
+          console.log('[HandGesture] 任意视频约束下摄像头权限已获得');
         }
       }
 
@@ -355,7 +365,15 @@ export class HandGestureController {
 
   async processFrame(): Promise<void> {
     if (this.hands && this.videoElement && this.enabled) {
-      await this.hands.send({ image: this.videoElement });
+      if (this.videoElement.readyState < 2) {
+        console.warn('[HandGesture] 视频尚未准备好:', this.videoElement.readyState);
+        return;
+      }
+      try {
+        await this.hands.send({ image: this.videoElement });
+      } catch (err) {
+        console.warn('[HandGesture] MediaPipe 处理帧失败:', err);
+      }
     }
   }
 

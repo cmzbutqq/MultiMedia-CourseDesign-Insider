@@ -353,10 +353,23 @@ async function main(): Promise<void> {
     }
   }
 
-  function updateHandGesture(): void {
+  let lastFrameTime = 0;
+  const frameInterval = 100;
+
+  async function updateHandGesture(): Promise<void> {
     if (!handGestureController || !params.handControl) return;
 
-    handGestureController.processFrame();
+    const now = performance.now();
+    if (now - lastFrameTime < frameInterval) return;
+    lastFrameTime = now;
+
+    try {
+      await handGestureController.processFrame();
+    } catch (err) {
+      console.warn('[HandGesture] 处理帧失败:', err);
+      return;
+    }
+
     const state = handGestureController.getState();
 
     if (state.handDetected) {
@@ -461,12 +474,12 @@ async function main(): Promise<void> {
   gui.add(params, 'tonemappingEnabled');
   gui.add(params, 'gamma', 1, 4);
 
-  function frame(now: number): void {
+  async function frame(now: number): Promise<void> {
     requestAnimationFrame(frame);
     const time = now / 1000;
     if (!pipeline) return;
 
-    updateHandGesture();
+    await updateHandGesture();
 
     const { width: rw, height: rh, main, mainMsaa, mainResolved, brightness, down, up, bloomFinal, taaBuffers, tonemapped, output } =
       pipeline;
