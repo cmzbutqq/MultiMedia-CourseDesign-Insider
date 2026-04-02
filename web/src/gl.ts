@@ -1,3 +1,7 @@
+export const MSAASAMPLES = 4;
+
+export type AntialiasMode = 'off' | 'fxaa' | 'taa';
+
 export function compileProgram(
   gl: WebGL2RenderingContext,
   vertSrc: string,
@@ -104,6 +108,63 @@ export function createColorRT(
 export function destroyColorRT(gl: WebGL2RenderingContext, rt: ColorRT): void {
   gl.deleteFramebuffer(rt.fbo);
   gl.deleteTexture(rt.texture);
+}
+
+export interface MSAART {
+  texture: WebGLTexture;
+  fbo: WebGLFramebuffer;
+}
+
+export function createMSAART(
+  gl: WebGL2RenderingContext,
+  width: number,
+  height: number,
+  _format: ColorRTFormat,
+  samples: number,
+): MSAART {
+  const texture = gl.createTexture()!;
+  gl.bindTexture(gl.TEXTURE_2D_MULTISAMPLE, texture);
+  const maxAttachments = gl.getParameter(gl.MAX_COLOR_ATTACHMENTS);
+  const actualSamples = Math.min(samples, maxAttachments);
+  gl.texImage2DMultisample(gl.TEXTURE_2D_MULTISAMPLE, actualSamples, gl.RGBA8, width, height, true);
+
+  const fbo = gl.createFramebuffer()!;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(
+    gl.DRAW_FRAMEBUFFER,
+    gl.COLOR_ATTACHMENT0,
+    gl.TEXTURE_2D_MULTISAMPLE,
+    texture,
+    0,
+  );
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.bindTexture(gl.TEXTURE_2D_MULTISAMPLE, null);
+
+  return { texture, fbo };
+}
+
+export function destroyMSAART(gl: WebGL2RenderingContext, rt: MSAART): void {
+  gl.deleteFramebuffer(rt.fbo);
+  gl.deleteTexture(rt.texture);
+}
+
+export function resolveMSAA(
+  gl: WebGL2RenderingContext,
+  msaa: MSAART,
+  target: ColorRT,
+  width: number,
+  height: number,
+): void {
+  gl.bindFramebuffer(gl.READ_FRAMEBUFFER, msaa.fbo);
+  gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, target.fbo);
+  gl.blitFramebuffer(
+    0, 0, width, height,
+    0, 0, width, height,
+    gl.COLOR_BUFFER_BIT,
+    gl.LINEAR,
+  );
+  gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+  gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
 }
 
 export function createQuadVAO(gl: WebGL2RenderingContext): WebGLVertexArrayObject {

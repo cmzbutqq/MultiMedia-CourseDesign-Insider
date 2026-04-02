@@ -8,10 +8,10 @@ export default defineConfig({
   base: process.env.GITHUB_ACTIONS === 'true' ? pagesBase : '/',
   server: {
     host: '0.0.0.0',
-    port: 5173,
-    strictPort: true,
+    port: 5174,
+    strictPort: false,
     hmr: {
-      clientPort: 5173,
+      clientPort: 5174,
     },
   },
   publicDir: 'public',

@@ -4,11 +4,20 @@ import {
   type ColorRTFormat,
   compileProgram,
   createColorRT,
+  createMSAART,
   createQuadVAO,
   destroyColorRT,
+  destroyMSAART,
   detectRTFormat,
+  resolveMSAA,
+  MSAASAMPLES,
+  type MSAART,
 } from './gl.js';
 import { loadCubemap, loadTexture2D } from './resources.js';
+import {
+  HandGestureController,
+  type GestureEvent,
+} from './handGesture.js';
 
 import simpleVert from '../shader/simple.vert?raw';
 import blackholeMainFrag from '../shader/blackhole_main.frag?raw';
@@ -18,14 +27,20 @@ import bloomUpFrag from '../shader/bloom_upsample.frag?raw';
 import bloomCompositeFrag from '../shader/bloom_composite.frag?raw';
 import tonemappingFrag from '../shader/tonemapping.frag?raw';
 import passthroughFrag from '../shader/passthrough.frag?raw';
+import fxaaFrag from '../shader/fxaa.frag?raw';
+import taaBlendFrag from '../shader/taa_blend.frag?raw';
 
 const MAX_BLOOM_ITER = 8;
 const MAX_DPR = 2;
 
+type AntialiasMode = 'off' | 'fxaa' | 'taa';
+
 interface Params {
+  antialias: AntialiasMode;
   gravatationalLensing: boolean;
   renderBlackHole: boolean;
   mouseControl: boolean;
+  handControl: boolean;
   cameraRoll: number;
   frontView: boolean;
   topView: boolean;
@@ -45,9 +60,11 @@ interface Params {
 }
 
 const params: Params = {
+  antialias: 'fxaa',
   gravatationalLensing: true,
   renderBlackHole: true,
   mouseControl: true,
+  handControl: false,
   cameraRoll: 0,
   frontView: false,
   topView: false,
@@ -68,11 +85,15 @@ const params: Params = {
 
 interface PipelineRTs {
   main: ColorRT;
+  mainMsaa: MSAART | null;
+  mainResolved: ColorRT | null;
   brightness: ColorRT;
   down: ColorRT[];
   up: ColorRT[];
   bloomFinal: ColorRT;
+  taaBuffers: [ColorRT, ColorRT] | null;
   tonemapped: ColorRT;
+  output: ColorRT;
   width: number;
   height: number;
   format: ColorRTFormat;
@@ -81,9 +102,16 @@ interface PipelineRTs {
 function destroyPipeline(gl: WebGL2RenderingContext, p: PipelineRTs | null): void {
   if (!p) return;
   destroyColorRT(gl, p.main);
+  if (p.mainMsaa) destroyMSAART(gl, p.mainMsaa);
+  if (p.mainResolved) destroyColorRT(gl, p.mainResolved);
   destroyColorRT(gl, p.brightness);
   destroyColorRT(gl, p.bloomFinal);
+  if (p.taaBuffers) {
+    destroyColorRT(gl, p.taaBuffers[0]);
+    destroyColorRT(gl, p.taaBuffers[1]);
+  }
   destroyColorRT(gl, p.tonemapped);
+  destroyColorRT(gl, p.output);
   for (const rt of p.down) destroyColorRT(gl, rt);
   for (const rt of p.up) destroyColorRT(gl, rt);
 }
@@ -93,11 +121,18 @@ function allocPipeline(
   width: number,
   height: number,
   format: ColorRTFormat,
+  aaMode: AntialiasMode,
 ): PipelineRTs {
   const main = createColorRT(gl, width, height, format);
+  const mainMsaa = aaMode === 'taa' ? createMSAART(gl, width, height, format, MSAASAMPLES) : null;
+  const mainResolved = mainMsaa ? createColorRT(gl, width, height, format) : null;
   const brightness = createColorRT(gl, width, height, format);
   const bloomFinal = createColorRT(gl, width, height, format);
   const tonemapped = createColorRT(gl, width, height, format);
+  const output = createColorRT(gl, width, height, format);
+  const taaBuffers: [ColorRT, ColorRT] | null = aaMode === 'taa'
+    ? [createColorRT(gl, width, height, format), createColorRT(gl, width, height, format)]
+    : null;
   const down: ColorRT[] = [];
   const up: ColorRT[] = [];
   for (let i = 0; i < MAX_BLOOM_ITER; i++) {
@@ -108,20 +143,21 @@ function allocPipeline(
     const uh = Math.max(1, height >> i);
     up.push(createColorRT(gl, uw, uh, format));
   }
-  return { main, brightness, down, up, bloomFinal, tonemapped, width, height, format };
+  return { main, mainMsaa, mainResolved, brightness, down, up, bloomFinal, taaBuffers, tonemapped, output, width, height, format };
 }
 
 function tryAllocPipeline(
   gl: WebGL2RenderingContext,
   width: number,
   height: number,
+  aaMode: AntialiasMode,
 ): { pipeline: PipelineRTs; format: ColorRTFormat } {
   const preferred = detectRTFormat(gl);
   try {
-    return { pipeline: allocPipeline(gl, width, height, preferred), format: preferred };
+    return { pipeline: allocPipeline(gl, width, height, preferred, aaMode), format: preferred };
   } catch {
     if (preferred === 'float16') {
-      return { pipeline: allocPipeline(gl, width, height, 'rgba8'), format: 'rgba8' };
+      return { pipeline: allocPipeline(gl, width, height, 'rgba8', aaMode), format: 'rgba8' };
     }
     throw new Error('无法创建离屏渲染目标');
   }
@@ -236,11 +272,14 @@ async function main(): Promise<void> {
       bloomUp: makePass(gl, simpleVert, bloomUpFrag),
       bloomComposite: makePass(gl, simpleVert, bloomCompositeFrag),
       tonemap: makePass(gl, simpleVert, tonemappingFrag),
+      fxaa: makePass(gl, simpleVert, fxaaFrag),
+      taaBlend: makePass(gl, simpleVert, taaBlendFrag),
       passthrough: makePass(gl, simpleVert, passthroughFrag),
     }),
   ]);
 
   setI1(gl, passes.passthrough.program, passes.passthrough.uniforms, 'texture0', 0);
+  setI1(gl, passes.fxaa.program, passes.fxaa.uniforms, 'texture0', 0);
 
   let mouseX = 0;
   let mouseY = 0;
@@ -253,6 +292,105 @@ async function main(): Promise<void> {
     mouseY = (e.clientY - rect.top) * sy;
   });
 
+  let handGestureController: HandGestureController | null = null;
+  let handVideo: HTMLVideoElement | null = null;
+  let handCanvas: HTMLCanvasElement | null = null;
+  let handOverlay: HTMLDivElement | null = null;
+  let handX = 0.5;
+  let handY = 0.5;
+
+  async function initHandGesture(): Promise<boolean> {
+    try {
+      handVideo = document.createElement('video');
+      handVideo.style.cssText = 'position:fixed;bottom:10px;left:10px;width:160px;height:120px;border:2px solid #00ff00;border-radius:8px;opacity:0.8;z-index:1000;transform:scaleX(-1);';
+      handVideo.playsInline = true;
+      handVideo.muted = true;
+
+      handCanvas = document.createElement('canvas');
+      handCanvas.width = 160;
+      handCanvas.height = 120;
+      handCanvas.style.cssText = 'position:fixed;bottom:135px;left:10px;border:2px solid #00ff00;border-radius:8px;opacity:0.8;z-index:1000;transform:scaleX(-1);';
+
+      handOverlay = document.createElement('div');
+      handOverlay.style.cssText = 'position:fixed;bottom:260px;left:10px;padding:8px 12px;background:rgba(0,0,0,0.7);color:#00ff00;border-radius:4px;font-size:12px;font-family:monospace;z-index:1000;';
+      handOverlay.textContent = '手势: 正在初始化摄像头...';
+
+      document.body.appendChild(handVideo);
+      document.body.appendChild(handCanvas);
+      document.body.appendChild(handOverlay);
+
+      handGestureController = new HandGestureController();
+      const success = await handGestureController.initialize(handVideo, handCanvas);
+
+      if (success) {
+        handGestureController.onGesture((event: GestureEvent) => {
+          if (event.type === 'pinch_start') {
+            handOverlay!.textContent = '手势: 捏合 (选中)';
+          } else if (event.type === 'pinch_end') {
+            handOverlay!.textContent = '手势: 捏合结束';
+          } else if (event.type === 'drag_start') {
+            handOverlay!.textContent = '手势: 拖动 (平移)';
+          } else if (event.type === 'drag_end') {
+            handOverlay!.textContent = '手势: 拖动结束';
+          } else if (event.type === 'rotate') {
+            handOverlay!.textContent = `手势: 旋转 (${(event.gestureState.rotationAngle).toFixed(1)}°)`;
+          }
+        });
+
+        console.log('[blackhole-web] 手势控制初始化成功');
+        return true;
+      } else {
+        handOverlay!.textContent = '手势: 摄像头不可用';
+        handOverlay!.style.color = '#ff4444';
+        console.error('[blackhole-web] 手势控制初始化失败');
+        return false;
+      }
+    } catch (error) {
+      handOverlay!.textContent = '手势: 初始化错误';
+      handOverlay!.style.color = '#ff4444';
+      console.error('[blackhole-web] 手势控制初始化错误:', error);
+      return false;
+    }
+  }
+
+  function updateHandGesture(): void {
+    if (!handGestureController || !params.handControl) return;
+
+    handGestureController.processFrame();
+    const state = handGestureController.getState();
+
+    if (state.handDetected) {
+      const results = handGestureController.getResults();
+      if (results?.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+        const landmarks = results.multiHandLandmarks[0];
+        const palmCenter = landmarks[9];
+        handX = palmCenter.x;
+        handY = palmCenter.y;
+
+        if (state.isPinching && state.isDragging) {
+          mouseX = handX * canvas.width;
+          mouseY = (1 - handY) * canvas.height;
+        }
+
+        if (state.isRotating) {
+          params.cameraRoll += state.rotationAngle;
+          params.cameraRoll = Math.max(-180, Math.min(180, params.cameraRoll));
+        }
+      }
+
+      const gestureName = state.gestureType === 'none' ? '追踪中' :
+                         state.gestureType === 'pinch' ? '捏合' :
+                         state.gestureType === 'drag' ? '拖动' : '旋转';
+      if (handOverlay) {
+        handOverlay.textContent = `手势: ${gestureName}`;
+      }
+    } else {
+      if (handOverlay) {
+        handOverlay.textContent = '手势: 未检测到手';
+      }
+    }
+  }
+
   let pipeline: PipelineRTs | null = null;
   let rtFormat: ColorRTFormat = 'rgba8';
 
@@ -264,7 +402,7 @@ async function main(): Promise<void> {
     canvas.width = w;
     canvas.height = h;
     destroyPipeline(gl, pipeline);
-    const r = tryAllocPipeline(gl, w, h);
+    const r = tryAllocPipeline(gl, w, h, params.antialias);
     pipeline = r.pipeline;
     rtFormat = r.format;
     if (rtFormat === 'rgba8') {
@@ -274,14 +412,38 @@ async function main(): Promise<void> {
     }
   }
 
+  let firstFrame = true;
+  let taaIdx = 0;
+
   const ro = new ResizeObserver(() => resizeNow());
   ro.observe(canvas);
   resizeNow();
 
   const gui = new GUI({ title: '参数' });
+
+  gui.add(params, 'antialias', {
+    '关闭 (Off)': 'off',
+    '快速边缘平滑 (FXAA)': 'fxaa',
+    '时序抗锯齿 (TAA)': 'taa',
+  }).name('抗锯齿');
+
   gui.add(params, 'gravatationalLensing');
   gui.add(params, 'renderBlackHole');
   gui.add(params, 'mouseControl');
+  gui.add(params, 'handControl').name('手势控制').onChange(async (enabled: boolean) => {
+    if (enabled) {
+      if (!handGestureController) {
+        const success = await initHandGesture();
+        if (!success) {
+          params.handControl = false;
+        }
+      } else {
+        handGestureController.setEnabled(true);
+      }
+    } else {
+      handGestureController?.setEnabled(false);
+    }
+  });
   gui.add(params, 'cameraRoll', -180, 180);
   gui.add(params, 'frontView');
   gui.add(params, 'topView');
@@ -304,11 +466,15 @@ async function main(): Promise<void> {
     const time = now / 1000;
     if (!pipeline) return;
 
-    const { width: rw, height: rh, main, brightness, down, up, bloomFinal, tonemapped } =
+    updateHandGesture();
+
+    const { width: rw, height: rh, main, mainMsaa, mainResolved, brightness, down, up, bloomFinal, taaBuffers, tonemapped, output } =
       pipeline;
     const n = params.bloomIterations;
+    const aaMode = params.antialias;
 
-    drawPass(gl, vao, passes.blackhole, main.fbo, rw, rh, time, () => {
+    const sceneTargetFbo = mainMsaa ? mainMsaa.fbo : main.fbo;
+    drawPass(gl, vao, passes.blackhole, sceneTargetFbo, rw, rh, time, () => {
       const p = passes.blackhole;
       setF(gl, p.program, p.uniforms, 'mouseX', mouseX);
       setF(gl, p.program, p.uniforms, 'mouseY', mouseY);
@@ -337,11 +503,48 @@ async function main(): Promise<void> {
       setF(gl, p.program, p.uniforms, 'adiskSpeed', params.adiskSpeed);
     });
 
+    let sceneTex = (() => {
+      if (mainMsaa && mainResolved) {
+        resolveMSAA(gl, mainMsaa, mainResolved, rw, rh);
+        return mainResolved.texture;
+      }
+      return main.texture;
+    })();
+
+    if (aaMode === 'taa' && taaBuffers) {
+      const readIdx = taaIdx % 2;
+      const writeIdx = 1 - readIdx;
+      if (firstFrame) {
+        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, mainMsaa ? mainResolved!.fbo : main.fbo);
+        gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, taaBuffers[0].fbo);
+        gl.blitFramebuffer(0, 0, rw, rh, 0, 0, rw, rh, gl.COLOR_BUFFER_BIT, gl.LINEAR);
+        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, mainMsaa ? mainResolved!.fbo : main.fbo);
+        gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, taaBuffers[1].fbo);
+        gl.blitFramebuffer(0, 0, rw, rh, 0, 0, rw, rh, gl.COLOR_BUFFER_BIT, gl.LINEAR);
+        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+        gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+        taaIdx = 1;
+      } else {
+        drawPass(gl, vao, passes.taaBlend, taaBuffers[writeIdx].fbo, rw, rh, time, () => {
+          const p = passes.taaBlend;
+          setI1(gl, p.program, p.uniforms, 'texture0', 0);
+          setI1(gl, p.program, p.uniforms, 'texture1', 1);
+          setF(gl, p.program, p.uniforms, 'firstFrame', 0.0);
+          gl.activeTexture(gl.TEXTURE0);
+          gl.bindTexture(gl.TEXTURE_2D, sceneTex);
+          gl.activeTexture(gl.TEXTURE1);
+          gl.bindTexture(gl.TEXTURE_2D, taaBuffers[readIdx].texture);
+        });
+        taaIdx++;
+      }
+      sceneTex = taaBuffers[firstFrame ? 0 : ((taaIdx - 1) % 2)].texture;
+    }
+
     drawPass(gl, vao, passes.bloomBright, brightness.fbo, rw, rh, time, () => {
       const p = passes.bloomBright;
       setI1(gl, p.program, p.uniforms, 'texture0', 0);
       gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, main.texture);
+      gl.bindTexture(gl.TEXTURE_2D, sceneTex);
     });
 
     for (let level = 0; level < n; level++) {
@@ -380,7 +583,7 @@ async function main(): Promise<void> {
       setF(gl, p.program, p.uniforms, 'tone', 1);
       setF(gl, p.program, p.uniforms, 'bloomStrength', params.bloomStrength);
       gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, main.texture);
+      gl.bindTexture(gl.TEXTURE_2D, sceneTex);
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D, up[0].texture);
     });
@@ -394,13 +597,30 @@ async function main(): Promise<void> {
       gl.bindTexture(gl.TEXTURE_2D, bloomFinal.texture);
     });
 
+    const aaInputTex = tonemapped.texture;
+    if (aaMode === 'fxaa') {
+      drawPass(gl, vao, passes.fxaa, output.fbo, rw, rh, time, () => {
+        setI1(gl, passes.fxaa.program, passes.fxaa.uniforms, 'texture0', 0);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, aaInputTex);
+      });
+    } else {
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, tonemapped.fbo);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, output.fbo);
+      gl.blitFramebuffer(0, 0, rw, rh, 0, 0, rw, rh, gl.COLOR_BUFFER_BIT, gl.LINEAR);
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+    }
+
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, canvas.width, canvas.height);
     drawPass(gl, vao, passes.passthrough, null, canvas.width, canvas.height, time, () => {
       setI1(gl, passes.passthrough.program, passes.passthrough.uniforms, 'texture0', 0);
       gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, tonemapped.texture);
+      gl.bindTexture(gl.TEXTURE_2D, output.texture);
     });
+
+    firstFrame = false;
   }
 
   requestAnimationFrame(frame);
