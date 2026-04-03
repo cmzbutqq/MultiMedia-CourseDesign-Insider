@@ -23,7 +23,7 @@ export interface GestureEvent {
   gestureState: GestureState;
 }
 
-type GestureCallback = (event: GestureEvent) => void;
+export type GestureCallback = (event: GestureEvent) => void;
 
 const PINCH_THRESHOLD = 0.07;
 const DRAG_THRESHOLD = 0.03;

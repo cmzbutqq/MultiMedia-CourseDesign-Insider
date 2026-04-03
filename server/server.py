@@ -1,0 +1,456 @@
+#!/usr/bin/env python3
+"""
+黑洞 Web - 服务端手势识别系统
+使用 MediaPipe Hands 进行手部检测和手势识别
+GPU 加速版本
+"""
+
+import base64
+import io
+import json
+import os
+import time
+import logging
+from typing import Optional, List, Dict, Any
+from dataclasses import dataclass, asdict
+from enum import Enum
+
+import cv2
+import numpy as np
+from PIL import Image
+import mediapipe as mp
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
+
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from flask_socketio import SocketIO, emit, join_room, leave_room
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'blackhole-hand-gesture-secret'
+CORS(app)
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+
+class GestureType(Enum):
+    NONE = "none"
+    PINCH = "pinch"
+    DRAG = "drag"
+    ROTATE = "rotate"
+
+@dataclass
+class HandLandmark:
+    x: float
+    y: float
+    z: float
+    visibility: float = 0.0
+
+@dataclass
+class GestureState:
+    is_pinching: bool = False
+    pinch_strength: float = 0.0
+    is_dragging: bool = False
+    drag_delta_x: float = 0.0
+    drag_delta_y: float = 0.0
+    is_rotating: bool = False
+    rotation_angle: float = 0.0
+    gesture_type: str = "none"
+    hand_detected: bool = False
+    hand_confidence: float = 0.0
+
+class GestureDetector:
+    """手势检测器 - MediaPipe Hands GPU 加速版本"""
+    
+    def __init__(self):
+        self.hands: Optional[mp.tasks.vision.HandLandmarker] = None
+        self.initialized = False
+        self.prev_landmarks: Optional[List[HandLandmark]] = None
+        self.prev_palm_center: Optional[Dict[str, float]] = None
+        self.prev_thumb_angle: Optional[float] = None
+        self.is_pinching = False
+        self.is_dragging = False
+        self.is_rotating = False
+        self.frame_counter = 0
+        
+        self.PINCH_THRESHOLD = 0.07
+        self.DRAG_THRESHOLD = 0.02
+        self.ROTATE_THRESHOLD = 0.1
+        
+        self._initialize_detector()
+    
+    def _initialize_detector(self):
+        """初始化 MediaPipe Hands 检测器"""
+        try:
+            logger.info("正在初始化 MediaPipe Hands 检测器...")
+            
+            base_options = python.BaseOptions(
+                model_asset_path='hand_landmarker.task',
+                delegate=python.BaseOptions.Delegate.GPU
+            )
+            options = vision.HandLandmarkerOptions(
+                base_options=base_options,
+                running_mode=vision.RunningMode.VIDEO,
+                num_hands=1,
+                min_hand_detection_confidence=0.7,
+                min_hand_presence_confidence=0.7,
+                min_tracking_confidence=0.5
+            )
+            
+            self.hands = vision.HandLandmarker.create_from_options(options)
+            self.initialized = True
+            logger.info("MediaPipe Hands 检测器初始化成功 (GPU 加速)")
+            
+        except Exception as e:
+            logger.error(f"MediaPipe 初始化失败: {e}")
+            logger.info("回退到 CPU 模式...")
+            self._initialize_cpu()
+    
+    def _initialize_cpu(self):
+        """CPU 回退模式"""
+        try:
+            base_options = python.BaseOptions(
+                model_asset_path='hand_landmarker.task',
+                delegate=python.BaseOptions.Delegate.CPU
+            )
+            options = vision.HandLandmarkerOptions(
+                base_options=base_options,
+                running_mode=vision.RunningMode.VIDEO,
+                num_hands=1,
+                min_hand_detection_confidence=0.7,
+                min_hand_presence_confidence=0.7,
+                min_tracking_confidence=0.5
+            )
+            
+            self.hands = vision.HandLandmarker.create_from_options(options)
+            self.initialized = True
+            logger.info("MediaPipe Hands 检测器初始化成功 (CPU 模式)")
+            
+        except Exception as e:
+            logger.error(f"CPU 初始化也失败: {e}")
+            raise
+    
+    def process_frame(self, image_data: bytes, timestamp_ms: int = 0) -> Dict[str, Any]:
+        """
+        处理单帧图像，返回手势识别结果
+        
+        Args:
+            image_data: JPEG 图片的字节数据
+            timestamp_ms: 时间戳（毫秒）
+            
+        Returns:
+            包含检测结果的字典
+        """
+        if not self.initialized or not self.hands:
+            return {
+                'success': False,
+                'error': '检测器未初始化',
+                'landmarks': [],
+                'gesture': asdict(GestureState())
+            }
+        
+        try:
+            nparr = np.frombuffer(image_data, np.uint8)
+            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            
+            if frame is None:
+                return {
+                    'success': False,
+                    'error': '无法解码图片',
+                    'landmarks': [],
+                    'gesture': asdict(GestureState())
+                }
+            
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
+            
+            self.frame_counter += 1
+            timestamp_ms = self.frame_counter * 33
+            
+            hand_results = self.hands.detect_for_video(mp_image, timestamp_ms)
+            
+            if not hand_results.hand_landmarks or len(hand_results.hand_landmarks) == 0:
+                gesture_state = GestureState()
+                self._reset_state()
+                return {
+                    'success': True,
+                    'hand_detected': False,
+                    'landmarks': [],
+                    'gesture': asdict(gesture_state)
+                }
+            
+            landmarks = hand_results.hand_landmarks[0]
+            gesture_state = self._process_gestures(landmarks)
+            
+            landmarks_dict = [
+                {
+                    'x': lm.x,
+                    'y': lm.y,
+                    'z': lm.z if hasattr(lm, 'z') else 0.0
+                }
+                for lm in landmarks
+            ]
+            
+            return {
+                'success': True,
+                'hand_detected': True,
+                'landmarks': landmarks_dict,
+                'gesture': asdict(gesture_state),
+                'num_landmarks': len(landmarks)
+            }
+            
+        except Exception as e:
+            logger.error(f"处理帧时出错: {e}")
+            return {
+                'success': False,
+                'error': str(e),
+                'landmarks': [],
+                'gesture': asdict(GestureState())
+            }
+    
+    def _process_gestures(self, landmarks) -> GestureState:
+        """处理手势识别逻辑"""
+        state = GestureState()
+        
+        if len(landmarks) < 21:
+            self._reset_state()
+            return state
+        
+        thumb_tip = landmarks[4]
+        index_tip = landmarks[8]
+        palm_center = landmarks[9]
+        
+        pinch_dist = self._get_distance(thumb_tip, index_tip)
+        
+        if pinch_dist < self.PINCH_THRESHOLD and not self.is_pinching:
+            self.is_pinching = True
+            logger.debug("检测到捏合开始")
+        
+        if pinch_dist >= self.PINCH_THRESHOLD and self.is_pinching:
+            self.is_pinching = False
+            self.is_dragging = False
+            logger.debug("检测到捏合结束")
+        
+        if self.prev_palm_center and self.is_pinching:
+            dx = palm_center.x - self.prev_palm_center['x']
+            dy = palm_center.y - self.prev_palm_center['y']
+            
+            if not self.is_dragging and (abs(dx) > self.DRAG_THRESHOLD or abs(dy) > self.DRAG_THRESHOLD):
+                self.is_dragging = True
+                logger.debug("检测到拖动开始")
+        
+        thumb_angle = np.arctan2(
+            landmarks[4].y - landmarks[3].y,
+            landmarks[4].x - landmarks[3].x
+        )
+        
+        if self.prev_thumb_angle is not None:
+            angle_diff = thumb_angle - self.prev_thumb_angle
+            if angle_diff > np.pi:
+                angle_diff -= 2 * np.pi
+            if angle_diff < -np.pi:
+                angle_diff += 2 * np.pi
+            
+            if abs(angle_diff) > self.ROTATE_THRESHOLD:
+                if not self.is_rotating:
+                    self.is_rotating = True
+                state.rotation_angle = angle_diff * 50
+                logger.debug(f"检测到旋转: {state.rotation_angle:.2f}°")
+            elif self.is_rotating:
+                self.is_rotating = False
+                state.rotation_angle = 0
+        
+        self.prev_palm_center = {'x': palm_center.x, 'y': palm_center.y}
+        self.prev_thumb_angle = thumb_angle
+        
+        state.is_pinching = self.is_pinching
+        state.pinch_strength = max(0, 1 - pinch_dist / self.PINCH_THRESHOLD) if self.PINCH_THRESHOLD > 0 else 0
+        state.is_dragging = self.is_dragging
+        state.is_rotating = self.is_rotating
+        state.hand_detected = True
+        
+        if self.is_pinching:
+            state.gesture_type = 'drag' if self.is_dragging else 'pinch'
+        elif self.is_rotating:
+            state.gesture_type = 'rotate'
+        else:
+            state.gesture_type = 'none'
+        
+        return state
+    
+    def _get_distance(self, p1, p2) -> float:
+        """计算两点间的距离"""
+        dx = p1.x - p2.x
+        dy = p1.y - p2.y
+        dz = (p1.z if hasattr(p1, 'z') else 0) - (p2.z if hasattr(p2, 'z') else 0)
+        return np.sqrt(dx*dx + dy*dy + dz*dz)
+    
+    def _reset_state(self):
+        """重置手势状态"""
+        self.is_pinching = False
+        self.is_dragging = False
+        self.is_rotating = False
+        self.prev_palm_center = None
+        self.prev_thumb_angle = None
+
+gesture_detector: Optional[GestureDetector] = None
+clients: Dict[str, Any] = {}
+
+@app.route('/health')
+def health():
+    """健康检查端点"""
+    return jsonify({
+        'status': 'healthy',
+        'gesture_detector_initialized': gesture_detector.initialized if gesture_detector else False
+    })
+
+@app.route('/api/detect', methods=['POST'])
+def detect_hand():
+    """
+    REST API: 检测单张图片中的手势
+    接收 base64 编码的 JPEG 图片
+    """
+    try:
+        data = request.get_json()
+        if not data or 'image' not in data:
+            return jsonify({'error': '缺少 image 字段'}), 400
+        
+        image_b64 = data['image']
+        if ',' in image_b64:
+            image_b64 = image_b64.split(',')[1]
+        
+        image_data = base64.b64decode(image_b64)
+        
+        result = gesture_detector.process_frame(image_data)
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        logger.error(f"API 处理错误: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@socketio.on('connect')
+def handle_connect():
+    """处理客户端连接"""
+    client_id = request.sid
+    logger.info(f"客户端连接: {client_id}")
+    clients[client_id] = {
+        'connected_at': time.time(),
+        'frames_processed': 0,
+        'last_frame_time': 0
+    }
+    emit('connected', {
+        'client_id': client_id,
+        'message': '已连接到手势识别服务器'
+    })
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    """处理客户端断开"""
+    client_id = request.sid
+    if client_id in clients:
+        logger.info(f"客户端断开: {client_id}, 处理了 {clients[client_id]['frames_processed']} 帧")
+        del clients[client_id]
+
+@socketio.on('video_frame')
+def handle_video_frame(data):
+    """
+    处理实时视频帧
+    期望 data 格式: {
+        'image': base64编码的JPEG图片（不带 data:image/jpeg;base64, 前缀）,
+        'timestamp': 时间戳（可选）
+    }
+    """
+    client_id = request.sid
+    
+    try:
+        if 'image' not in data:
+            emit('frame_error', {'error': '缺少 image 字段'})
+            return
+        
+        image_b64 = data['image']
+        if ',' in image_b64:
+            image_b64 = image_b64.split(',')[1]
+        
+        image_data = base64.b64decode(image_b64)
+        timestamp = data.get('timestamp', int(time.time() * 1000))
+        
+        result = gesture_detector.process_frame(image_data, timestamp)
+        
+        if client_id in clients:
+            clients[client_id]['frames_processed'] += 1
+            clients[client_id]['last_frame_time'] = time.time()
+        
+        if result['success']:
+            emit('hand_results', result)
+        else:
+            emit('frame_error', {'error': result.get('error', '处理失败')})
+            
+    except Exception as e:
+        logger.error(f"处理帧时出错 ({client_id}): {e}")
+        emit('frame_error', {'error': str(e)})
+
+@socketio.on('subscribe')
+def handle_subscribe(data):
+    """订阅特定房间（用于多用户支持）"""
+    room = data.get('room', 'default')
+    join_room(room)
+    logger.info(f"客户端 {request.sid} 加入房间 {room}")
+    emit('subscribed', {'room': room})
+
+@socketio.on('unsubscribe')
+def handle_unsubscribe(data):
+    """取消订阅房间"""
+    room = data.get('room', 'default')
+    leave_room(room)
+    logger.info(f"客户端 {request.sid} 离开房间 {room}")
+    emit('unsubscribed', {'room': room})
+
+def initialize_detector():
+    """初始化手势检测器"""
+    global gesture_detector
+    gesture_detector = GestureDetector()
+
+def print_stats():
+    """打印服务器统计信息"""
+    if clients:
+        logger.info(f"当前连接数: {len(clients)}")
+        for cid, info in clients.items():
+            fps = info['frames_processed'] / (time.time() - info['connected_at']) if info['frames_processed'] > 0 else 0
+            logger.info(f"  客户端 {cid}: {info['frames_processed']} 帧, {fps:.1f} FPS")
+
+if __name__ == '__main__':
+    logger.info("=" * 60)
+    logger.info("黑洞 Web - 服务端手势识别系统")
+    logger.info("=" * 60)
+    
+    logger.info("正在下载 MediaPipe 模型...")
+    import urllib.request
+    model_url = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task'
+    model_path = 'hand_landmarker.task'
+    if not os.path.exists(model_path):
+        try:
+            urllib.request.urlretrieve(model_url, model_path)
+            logger.info("模型下载完成")
+        except Exception as e:
+            logger.warning(f"模型下载失败: {e}")
+            logger.warning("请手动下载模型或使用 CPU 模式")
+    
+    logger.info("初始化手势检测器...")
+    initialize_detector()
+    
+    logger.info("=" * 60)
+    logger.info("服务器启动成功!")
+    logger.info("  - HTTP API: http://0.0.0.0:5000/api/detect")
+    logger.info("  - WebSocket: ws://0.0.0.0:5000")
+    logger.info("  - 健康检查: http://0.0.0.0:5000/health")
+    logger.info("=" * 60)
+    
+    socketio.run(
+        app,
+        host='0.0.0.0',
+        port=5000,
+        debug=False,
+        use_reloader=False
+    )

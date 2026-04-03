@@ -18,6 +18,7 @@ import {
   HandGestureController,
   type GestureEvent,
 } from './handGesture.js';
+import { ServerGestureClient } from './serverGestureClient.js';
 
 import simpleVert from '../shader/simple.vert?raw';
 import blackholeMainFrag from '../shader/blackhole_main.frag?raw';
@@ -34,6 +35,7 @@ const MAX_BLOOM_ITER = 8;
 const MAX_DPR = 2;
 
 type AntialiasMode = 'off' | 'fxaa' | 'taa';
+type GestureMode = 'local' | 'server';
 
 interface Params {
   antialias: AntialiasMode;
@@ -41,6 +43,7 @@ interface Params {
   renderBlackHole: boolean;
   mouseControl: boolean;
   handControl: boolean;
+  gestureMode: GestureMode;
   cameraRoll: number;
   frontView: boolean;
   topView: boolean;
@@ -65,6 +68,7 @@ const params: Params = {
   renderBlackHole: true,
   mouseControl: true,
   handControl: false,
+  gestureMode: 'server',
   cameraRoll: 0,
   frontView: false,
   topView: false,
@@ -293,6 +297,7 @@ async function main(): Promise<void> {
   });
 
   let handGestureController: HandGestureController | null = null;
+  let serverGestureClient: ServerGestureClient | null = null;
   let handVideo: HTMLVideoElement | null = null;
   let handCanvas: HTMLCanvasElement | null = null;
   let handOverlay: HTMLDivElement | null = null;
@@ -313,38 +318,16 @@ async function main(): Promise<void> {
 
       handOverlay = document.createElement('div');
       handOverlay.style.cssText = 'position:fixed;bottom:260px;left:10px;padding:8px 12px;background:rgba(0,0,0,0.7);color:#00ff00;border-radius:4px;font-size:12px;font-family:monospace;z-index:1000;';
-      handOverlay.textContent = '手势: 正在初始化摄像头...';
+      handOverlay.textContent = `手势: 正在初始化 (${params.gestureMode === 'server' ? '服务器模式' : '本地模式'})...`;
 
       document.body.appendChild(handVideo);
       document.body.appendChild(handCanvas);
       document.body.appendChild(handOverlay);
 
-      handGestureController = new HandGestureController();
-      const success = await handGestureController.initialize(handVideo, handCanvas);
-
-      if (success) {
-        handGestureController.onGesture((event: GestureEvent) => {
-          if (event.type === 'pinch_start') {
-            handOverlay!.textContent = '手势: 捏合 (选中)';
-          } else if (event.type === 'pinch_end') {
-            handOverlay!.textContent = '手势: 捏合结束';
-          } else if (event.type === 'drag_start') {
-            handOverlay!.textContent = '手势: 拖动 (平移)';
-          } else if (event.type === 'drag_end') {
-            handOverlay!.textContent = '手势: 拖动结束';
-          } else if (event.type === 'rotate') {
-            handOverlay!.textContent = `手势: 旋转 (${(event.gestureState.rotationAngle).toFixed(1)}°)`;
-          }
-        });
-
-        handGestureController.setEnabled(true);
-        console.log('[blackhole-web] 手势控制初始化成功');
-        return true;
+      if (params.gestureMode === 'server') {
+        return await initServerGesture();
       } else {
-        handOverlay!.textContent = '手势: 摄像头不可用';
-        handOverlay!.style.color = '#ff4444';
-        console.error('[blackhole-web] 手势控制初始化失败');
-        return false;
+        return await initLocalGesture();
       }
     } catch (error) {
       handOverlay!.textContent = '手势: 初始化错误';
@@ -354,11 +337,89 @@ async function main(): Promise<void> {
     }
   }
 
+  async function initLocalGesture(): Promise<boolean> {
+    handGestureController = new HandGestureController();
+    const success = await handGestureController.initialize(handVideo!, handCanvas!);
+
+    if (success) {
+      handGestureController.onGesture((event: GestureEvent) => {
+        updateGestureOverlay(event);
+      });
+
+      handGestureController.setEnabled(true);
+      console.log('[blackhole-web] 本地手势控制初始化成功');
+      return true;
+    } else {
+      handOverlay!.textContent = '手势: 摄像头不可用';
+      handOverlay!.style.color = '#ff4444';
+      console.error('[blackhole-web] 本地手势控制初始化失败');
+      return false;
+    }
+  }
+
+  async function initServerGesture(): Promise<boolean> {
+    serverGestureClient = new ServerGestureClient({
+      host: 'localhost',
+      port: 5000,
+      useSSL: false,
+    });
+
+    const success = await serverGestureClient.initialize(handVideo!, handCanvas!);
+
+    if (success) {
+      serverGestureClient.onGesture((event: GestureEvent) => {
+        updateGestureOverlay(event);
+        
+        const state = event.gestureState;
+        if (state.handDetected && state.isPinching && state.isDragging) {
+          mouseX = handX * canvas.width;
+          mouseY = (1 - handY) * canvas.height;
+        }
+        if (state.isRotating) {
+          params.cameraRoll += state.rotationAngle * 0.5;
+        }
+      });
+
+      serverGestureClient.enable();
+      handOverlay!.textContent = '手势: 服务器模式已连接';
+      console.log('[blackhole-web] 服务器端手势控制初始化成功');
+      return true;
+    } else {
+      handOverlay!.textContent = '手势: 服务器连接失败';
+      handOverlay!.style.color = '#ff4444';
+      console.error('[blackhole-web] 服务器端手势控制初始化失败');
+      return false;
+    }
+  }
+
+  function updateGestureOverlay(event: GestureEvent): void {
+    if (!handOverlay) return;
+    
+    const mode = params.gestureMode === 'server' ? '[服务器]' : '[本地]';
+    if (event.type === 'pinch_start') {
+      handOverlay.textContent = `手势 ${mode}: 捏合 (选中)`;
+    } else if (event.type === 'pinch_end') {
+      handOverlay.textContent = `手势 ${mode}: 捏合结束`;
+    } else if (event.type === 'drag_start') {
+      handOverlay.textContent = `手势 ${mode}: 拖动 (平移)`;
+    } else if (event.type === 'drag_end') {
+      handOverlay.textContent = `手势 ${mode}: 拖动结束`;
+    } else if (event.type === 'rotate') {
+      handOverlay.textContent = `手势 ${mode}: 旋转 (${(event.gestureState.rotationAngle).toFixed(1)}°)`;
+    }
+  }
+
   let lastFrameTime = 0;
   const frameInterval = 100;
 
   async function updateHandGesture(): Promise<void> {
-    if (!handGestureController || !params.handControl) return;
+    if (!params.handControl) return;
+
+    if (params.gestureMode === 'server') {
+      return;
+    }
+
+    if (!handGestureController) return;
 
     const now = performance.now();
     if (now - lastFrameTime < frameInterval) return;
@@ -396,11 +457,11 @@ async function main(): Promise<void> {
                          state.gestureType === 'pinch' ? '捏合' :
                          state.gestureType === 'drag' ? '拖动' : '旋转';
       if (handOverlay) {
-        handOverlay.textContent = `手势: ${gestureName}`;
+        handOverlay.textContent = `手势 [本地]: ${gestureName}`;
       }
     } else {
       if (handOverlay) {
-        handOverlay.textContent = '手势: 未检测到手';
+        handOverlay.textContent = '手势 [本地]: 未检测到手';
       }
     }
   }
@@ -444,18 +505,37 @@ async function main(): Promise<void> {
   gui.add(params, 'gravatationalLensing');
   gui.add(params, 'renderBlackHole');
   gui.add(params, 'mouseControl');
+  gui.add(params, 'gestureMode', {
+    '本地模式': 'local',
+    '服务器模式': 'server',
+  }).name('手势识别模式');
   gui.add(params, 'handControl').name('手势控制').onChange(async (enabled: boolean) => {
     if (enabled) {
-      if (!handGestureController) {
-        const success = await initHandGesture();
-        if (!success) {
-          params.handControl = false;
+      if (params.gestureMode === 'server') {
+        if (!serverGestureClient) {
+          const success = await initHandGesture();
+          if (!success) {
+            params.handControl = false;
+          }
+        } else {
+          serverGestureClient.enable();
         }
       } else {
-        handGestureController.setEnabled(true);
+        if (!handGestureController) {
+          const success = await initHandGesture();
+          if (!success) {
+            params.handControl = false;
+          }
+        } else {
+          handGestureController.setEnabled(true);
+        }
       }
     } else {
-      handGestureController?.setEnabled(false);
+      if (params.gestureMode === 'server') {
+        serverGestureClient?.disable();
+      } else {
+        handGestureController?.setEnabled(false);
+      }
     }
   });
   gui.add(params, 'cameraRoll', -180, 180);
