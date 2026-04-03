@@ -1,14 +1,24 @@
-import {
-  GestureState,
-  GestureEvent,
-  GestureCallback,
-} from './handGesture';
-
 export interface ServerConfig {
   host: string;
   port: number;
   useSSL: boolean;
 }
+
+export interface GestureState {
+  palmX: number;
+  palmY: number;
+  isOpenPalm: boolean;
+  fingerCount: number;
+  handDetected: boolean;
+  handConfidence: number;
+}
+
+export interface GestureEvent {
+  type: 'hand_move' | 'hand_detected' | 'hand_lost';
+  gestureState: GestureState;
+}
+
+type GestureCallback = (event: GestureEvent) => void;
 
 export class ServerGestureClient {
   private videoElement: HTMLVideoElement | null = null;
@@ -22,18 +32,15 @@ export class ServerGestureClient {
   private frameCount: number = 0;
   private fps: number = 0;
   private config: ServerConfig;
+  private wasHandDetected: boolean = false;
 
   private gestureState: GestureState = {
-    isPinching: false,
-    pinchStrength: 0,
-    isDragging: false,
-    dragDeltaX: 0,
-    dragDeltaY: 0,
-    isRotating: false,
-    rotationAngle: 0,
+    palmX: 0.5,
+    palmY: 0.5,
+    isOpenPalm: false,
+    fingerCount: 0,
     handDetected: false,
     handConfidence: 0,
-    gestureType: 'none',
   };
 
   constructor(config?: Partial<ServerConfig>) {
@@ -139,33 +146,29 @@ export class ServerGestureClient {
     }
 
     if (hand_detected && gesture) {
+      const prevPalmX = this.gestureState.palmX;
+      const prevPalmY = this.gestureState.palmY;
+
       this.gestureState = {
-        isPinching: gesture.is_pinching,
-        pinchStrength: gesture.pinch_strength,
-        isDragging: gesture.is_dragging,
-        dragDeltaX: gesture.drag_delta_x || 0,
-        dragDeltaY: gesture.drag_delta_y || 0,
-        isRotating: gesture.is_rotating,
-        rotationAngle: gesture.rotation_angle,
+        palmX: gesture.palm_x || 0.5,
+        palmY: gesture.palm_y || 0.5,
+        isOpenPalm: gesture.is_open_palm || false,
+        fingerCount: gesture.finger_count || 0,
         handDetected: true,
         handConfidence: gesture.hand_confidence || 0.8,
-        gestureType: gesture.gesture_type,
       };
 
-      if (gesture.is_pinching && !this.gestureState.isPinching) {
-        this.emitEvent({ type: 'pinch_start', gestureState: { ...this.gestureState } });
-      } else if (!gesture.is_pinching && this.gestureState.isPinching) {
-        this.emitEvent({ type: 'pinch_end', gestureState: { ...this.gestureState } });
-      }
-
-      if (gesture.is_dragging) {
-        this.emitEvent({ type: 'drag_start', gestureState: { ...this.gestureState } });
-      }
-
-      if (gesture.is_rotating) {
-        this.emitEvent({ type: 'rotate', gestureState: { ...this.gestureState } });
+      if (!this.wasHandDetected) {
+        this.wasHandDetected = true;
+        this.emitEvent({ type: 'hand_detected', gestureState: { ...this.gestureState } });
+      } else if (this.gestureState.isOpenPalm) {
+        this.emitEvent({ type: 'hand_move', gestureState: { ...this.gestureState } });
       }
     } else {
+      if (this.wasHandDetected) {
+        this.wasHandDetected = false;
+        this.emitEvent({ type: 'hand_lost', gestureState: { ...this.gestureState } });
+      }
       this.resetGestureState();
     }
   }
@@ -358,16 +361,12 @@ export class ServerGestureClient {
 
   private resetGestureState(): void {
     this.gestureState = {
-      isPinching: false,
-      pinchStrength: 0,
-      isDragging: false,
-      dragDeltaX: 0,
-      dragDeltaY: 0,
-      isRotating: false,
-      rotationAngle: 0,
+      palmX: 0.5,
+      palmY: 0.5,
+      isOpenPalm: false,
+      fingerCount: 0,
       handDetected: false,
       handConfidence: 0,
-      gestureType: 'none',
     };
   }
 

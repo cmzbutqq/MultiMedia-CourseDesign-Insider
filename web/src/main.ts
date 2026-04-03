@@ -367,16 +367,15 @@ async function main(): Promise<void> {
     const success = await serverGestureClient.initialize(handVideo!, handCanvas!);
 
     if (success) {
-      serverGestureClient.onGesture((event: GestureEvent) => {
+      serverGestureClient.onGesture((event) => {
         updateGestureOverlay(event);
         
-        const state = event.gestureState;
-        if (state.handDetected && state.isPinching && state.isDragging) {
-          mouseX = handX * canvas.width;
-          mouseY = (1 - handY) * canvas.height;
-        }
-        if (state.isRotating) {
-          params.cameraRoll += state.rotationAngle * 0.5;
+        if (event.type === 'hand_move' || event.type === 'hand_detected') {
+          const state = event.gestureState;
+          if (state.handDetected && state.isOpenPalm) {
+            mouseX = state.palmX * canvas.width;
+            mouseY = (1 - state.palmY) * canvas.height;
+          }
         }
       });
 
@@ -392,20 +391,16 @@ async function main(): Promise<void> {
     }
   }
 
-  function updateGestureOverlay(event: GestureEvent): void {
+  function updateGestureOverlay(event: any): void {
     if (!handOverlay) return;
     
-    const mode = params.gestureMode === 'server' ? '[服务器]' : '[本地]';
-    if (event.type === 'pinch_start') {
-      handOverlay.textContent = `手势 ${mode}: 捏合 (选中)`;
-    } else if (event.type === 'pinch_end') {
-      handOverlay.textContent = `手势 ${mode}: 捏合结束`;
-    } else if (event.type === 'drag_start') {
-      handOverlay.textContent = `手势 ${mode}: 拖动 (平移)`;
-    } else if (event.type === 'drag_end') {
-      handOverlay.textContent = `手势 ${mode}: 拖动结束`;
-    } else if (event.type === 'rotate') {
-      handOverlay.textContent = `手势 ${mode}: 旋转 (${(event.gestureState.rotationAngle).toFixed(1)}°)`;
+    if (event.type === 'hand_detected') {
+      handOverlay.textContent = `手势: 检测到手部`;
+    } else if (event.type === 'hand_lost') {
+      handOverlay.textContent = `手势: 未检测到手`;
+    } else if (event.type === 'hand_move') {
+      const state = event.gestureState;
+      handOverlay.textContent = `手势: 张开手掌 (${state.fingerCount}指) [${(state.palmX * 100).toFixed(0)}%, ${(state.palmY * 100).toFixed(0)}%]`;
     }
   }
 

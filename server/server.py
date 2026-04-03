@@ -49,16 +49,12 @@ class HandLandmark:
 
 @dataclass
 class GestureState:
-    is_pinching: bool = False
-    pinch_strength: float = 0.0
-    is_dragging: bool = False
-    drag_delta_x: float = 0.0
-    drag_delta_y: float = 0.0
-    is_rotating: bool = False
-    rotation_angle: float = 0.0
-    gesture_type: str = "none"
     hand_detected: bool = False
     hand_confidence: float = 0.0
+    palm_x: float = 0.5
+    palm_y: float = 0.5
+    is_open_palm: bool = False
+    finger_count: int = 0
 
 class GestureDetector:
     """手势检测器 - MediaPipe Hands GPU 加速版本"""
@@ -66,17 +62,7 @@ class GestureDetector:
     def __init__(self):
         self.hands: Optional[mp.tasks.vision.HandLandmarker] = None
         self.initialized = False
-        self.prev_landmarks: Optional[List[HandLandmark]] = None
-        self.prev_palm_center: Optional[Dict[str, float]] = None
-        self.prev_thumb_angle: Optional[float] = None
-        self.is_pinching = False
-        self.is_dragging = False
-        self.is_rotating = False
         self.frame_counter = 0
-        
-        self.PINCH_THRESHOLD = 0.07
-        self.DRAG_THRESHOLD = 0.02
-        self.ROTATE_THRESHOLD = 0.1
         
         self._initialize_detector()
     
@@ -93,8 +79,8 @@ class GestureDetector:
                 base_options=base_options,
                 running_mode=vision.RunningMode.VIDEO,
                 num_hands=1,
-                min_hand_detection_confidence=0.7,
-                min_hand_presence_confidence=0.7,
+                min_hand_detection_confidence=0.5,
+                min_hand_presence_confidence=0.5,
                 min_tracking_confidence=0.5
             )
             
@@ -118,8 +104,8 @@ class GestureDetector:
                 base_options=base_options,
                 running_mode=vision.RunningMode.VIDEO,
                 num_hands=1,
-                min_hand_detection_confidence=0.7,
-                min_hand_presence_confidence=0.7,
+                min_hand_detection_confidence=0.5,
+                min_hand_presence_confidence=0.5,
                 min_tracking_confidence=0.5
             )
             
@@ -210,74 +196,50 @@ class GestureDetector:
             }
     
     def _process_gestures(self, landmarks) -> GestureState:
-        """处理手势识别逻辑"""
+        """处理手势识别逻辑 - 简化为手掌位置和开合检测"""
         state = GestureState()
         
         if len(landmarks) < 21:
-            self._reset_state()
             return state
         
-        thumb_tip = landmarks[4]
-        index_tip = landmarks[8]
         palm_center = landmarks[9]
         
-        pinch_dist = self._get_distance(thumb_tip, index_tip)
-        
-        if pinch_dist < self.PINCH_THRESHOLD and not self.is_pinching:
-            self.is_pinching = True
-            logger.debug("检测到捏合开始")
-        
-        if pinch_dist >= self.PINCH_THRESHOLD and self.is_pinching:
-            self.is_pinching = False
-            self.is_dragging = False
-            logger.debug("检测到捏合结束")
-        
-        if self.prev_palm_center and self.is_pinching:
-            dx = palm_center.x - self.prev_palm_center['x']
-            dy = palm_center.y - self.prev_palm_center['y']
-            
-            if not self.is_dragging and (abs(dx) > self.DRAG_THRESHOLD or abs(dy) > self.DRAG_THRESHOLD):
-                self.is_dragging = True
-                logger.debug("检测到拖动开始")
-        
-        thumb_angle = np.arctan2(
-            landmarks[4].y - landmarks[3].y,
-            landmarks[4].x - landmarks[3].x
-        )
-        
-        if self.prev_thumb_angle is not None:
-            angle_diff = thumb_angle - self.prev_thumb_angle
-            if angle_diff > np.pi:
-                angle_diff -= 2 * np.pi
-            if angle_diff < -np.pi:
-                angle_diff += 2 * np.pi
-            
-            if abs(angle_diff) > self.ROTATE_THRESHOLD:
-                if not self.is_rotating:
-                    self.is_rotating = True
-                state.rotation_angle = angle_diff * 50
-                logger.debug(f"检测到旋转: {state.rotation_angle:.2f}°")
-            elif self.is_rotating:
-                self.is_rotating = False
-                state.rotation_angle = 0
-        
-        self.prev_palm_center = {'x': palm_center.x, 'y': palm_center.y}
-        self.prev_thumb_angle = thumb_angle
-        
-        state.is_pinching = self.is_pinching
-        state.pinch_strength = max(0, 1 - pinch_dist / self.PINCH_THRESHOLD) if self.PINCH_THRESHOLD > 0 else 0
-        state.is_dragging = self.is_dragging
-        state.is_rotating = self.is_rotating
+        state.palm_x = palm_center.x
+        state.palm_y = palm_center.y
         state.hand_detected = True
+        state.hand_confidence = 0.8
         
-        if self.is_pinching:
-            state.gesture_type = 'drag' if self.is_dragging else 'pinch'
-        elif self.is_rotating:
-            state.gesture_type = 'rotate'
-        else:
-            state.gesture_type = 'none'
+        finger_count = self._count_extended_fingers(landmarks)
+        state.finger_count = finger_count
+        state.is_open_palm = finger_count >= 4
         
         return state
+    
+    def _count_extended_fingers(self, landmarks) -> int:
+        """计算伸展的手指数量"""
+        finger_tips = [8, 12, 16, 20]
+        finger_mids = [6, 10, 14, 18]
+        
+        extended_count = 0
+        
+        for tip_idx, mid_idx in zip(finger_tips, finger_mids):
+            tip = landmarks[tip_idx]
+            mid = landmarks[mid_idx]
+            pip = landmarks[mid_idx - 1]
+            
+            if tip.y < mid.y and tip.y < pip.y:
+                extended_count += 1
+        
+        thumb_tip = landmarks[4]
+        thumb_ip = landmarks[3]
+        wrist = landmarks[0]
+        
+        thumb_extended = (thumb_tip.x - wrist.x) > (thumb_ip.x - wrist.x) if wrist.x < 0.5 else (thumb_tip.x - wrist.x) < (thumb_ip.x - wrist.x)
+        
+        if thumb_extended:
+            extended_count += 1
+        
+        return extended_count
     
     def _get_distance(self, p1, p2) -> float:
         """计算两点间的距离"""
@@ -288,11 +250,7 @@ class GestureDetector:
     
     def _reset_state(self):
         """重置手势状态"""
-        self.is_pinching = False
-        self.is_dragging = False
-        self.is_rotating = False
-        self.prev_palm_center = None
-        self.prev_thumb_angle = None
+        pass
 
 gesture_detector: Optional[GestureDetector] = None
 clients: Dict[str, Any] = {}
