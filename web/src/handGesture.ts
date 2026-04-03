@@ -83,9 +83,26 @@ export class HandGestureController {
         modelComplexity: 0,
         minDetectionConfidence: 0.7,
         minTrackingConfidence: 0.5,
+        runningMode: 'VIDEO',
       } as any);
 
       this.hands.onResults((results: Results) => this.onResults(results));
+
+      console.log('[HandGesture] 正在加载 MediaPipe Hands 模型...');
+      await new Promise<void>((resolve) => {
+        if ((this.hands as any).initialize) {
+          (this.hands as any).initialize().then(() => {
+            console.log('[HandGesture] MediaPipe Hands 模型加载完成');
+            resolve();
+          }).catch((err: any) => {
+            console.warn('[HandGesture] MediaPipe Hands 初始化警告:', err);
+            resolve();
+          });
+        } else {
+          console.log('[HandGesture] MediaPipe Hands 立即就绪');
+          resolve();
+        }
+      });
 
       let stream: MediaStream | null = null;
 
@@ -151,6 +168,14 @@ export class HandGestureController {
 
       this.isInitialized = true;
       console.log('[HandGesture] 手势控制初始化成功');
+      console.log('[HandGesture] 视频元素状态:', {
+        readyState: this.videoElement.readyState,
+        videoWidth: this.videoElement.videoWidth,
+        videoHeight: this.videoElement.videoHeight,
+        paused: this.videoElement.paused,
+        ended: this.videoElement.ended,
+      });
+      console.log('[HandGesture] MediaPipe Hands 已准备好，请将手放到摄像头前...');
       return true;
     } catch (error) {
       console.error('[HandGesture] 初始化失败:', error);
@@ -164,14 +189,25 @@ export class HandGestureController {
   private async onResults(results: Results): Promise<void> {
     this.lastResults = results;
 
+    console.log('[HandGesture] onResults 被调用');
+    console.log('[HandGesture] 检测到手数量:', results.multiHandLandmarks?.length || 0);
+
     if (this.canvasCtx && this.canvasElement) {
       this.drawHandLandmarks(results);
     }
 
     if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
       const landmarks = results.multiHandLandmarks[0];
-      this.processGestures(landmarks);
+      console.log('[HandGesture] 检测到手部关键点数量:', landmarks.length);
+      
+      if (landmarks.length >= 10) {
+        this.processGestures(landmarks);
+      } else {
+        console.warn('[HandGesture] 关键点不足，跳过手势识别');
+        this.resetGestureState();
+      }
     } else {
+      console.log('[HandGesture] 未检测到手');
       this.resetGestureState();
     }
   }
@@ -370,10 +406,18 @@ export class HandGestureController {
         return;
       }
       try {
+        console.log('[HandGesture] processFrame: 发送帧到 MediaPipe...');
         await this.hands.send({ image: this.videoElement });
+        console.log('[HandGesture] processFrame: 帧处理完成');
       } catch (err) {
         console.warn('[HandGesture] MediaPipe 处理帧失败:', err);
       }
+    } else {
+      console.warn('[HandGesture] processFrame: 条件不满足', {
+        hasHands: !!this.hands,
+        hasVideo: !!this.videoElement,
+        enabled: this.enabled,
+      });
     }
   }
 

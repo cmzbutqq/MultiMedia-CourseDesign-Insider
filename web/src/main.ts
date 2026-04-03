@@ -337,6 +337,7 @@ async function main(): Promise<void> {
           }
         });
 
+        handGestureController.setEnabled(true);
         console.log('[blackhole-web] 手势控制初始化成功');
         return true;
       } else {
