@@ -30,14 +30,16 @@ export class HandGestureController {
   private enabled: boolean = false;
   private isInitialized: boolean = false;
   private wasHandDetected: boolean = false;
+  private lastResults: Results | null = null;
 
   private smoothedPalmX: number = 0.5;
   private smoothedPalmY: number = 0.5;
-  private smoothingFactor: number = 0.08;
-  private palmDeadzone: number = 0.04;
-  private velocityX: number = 0;
-  private velocityY: number = 0;
-  private velocityDamping: number = 0.85;
+  private smoothingFactor: number = 0.1;
+  private palmDeadzone: number = 0.1;
+  private lastEmitX: number = 0.5;
+  private lastEmitY: number = 0.5;
+  private emitThreshold: number = 0.005;
+  private lastEmitTime: number = 0;
 
   private gestureState: GestureState = {
     palmX: 0.5,
@@ -73,7 +75,9 @@ export class HandGestureController {
         modelComplexity: 0,
         minDetectionConfidence: 0.5,
         minTrackingConfidence: 0.5,
+        selfieMode: true,
         runningMode: 'VIDEO',
+        fps: 30,
       } as any);
 
       this.hands.onResults((results: Results) => this.onResults(results));
@@ -104,9 +108,9 @@ export class HandGestureController {
 
       const constraints: MediaStreamConstraints = {
         video: {
-          width: { min: 160, ideal: 320, max: 640 },
-          height: { min: 120, ideal: 240, max: 480 },
-          frameRate: { ideal: 15, min: 10 },
+          width: { min: 160, ideal: 240, max: 320 },
+          height: { min: 120, ideal: 180, max: 240 },
+          frameRate: { ideal: 30, min: 20 },
         },
         audio: false,
       };
@@ -132,6 +136,8 @@ export class HandGestureController {
   private onResults(results: Results): void {
     if (!this.enabled) return;
 
+    this.lastResults = results;
+
     if (this.canvasCtx && this.canvasElement) {
       this.drawHandLandmarks(results);
     }
@@ -154,8 +160,6 @@ export class HandGestureController {
       this.wasHandDetected = false;
       this.emitEvent({ type: 'hand_lost', gestureState: { ...this.gestureState } });
     }
-    this.velocityX *= 0.5;
-    this.velocityY *= 0.5;
     this.resetGestureState();
   }
 
@@ -238,14 +242,8 @@ export class HandGestureController {
     const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
 
     if (distance > this.palmDeadzone) {
-      this.velocityX = this.velocityX * this.velocityDamping + deltaX * this.smoothingFactor;
-      this.velocityY = this.velocityY * this.velocityDamping + deltaY * this.smoothingFactor;
-
-      this.smoothedPalmX += this.velocityX;
-      this.smoothedPalmY += this.velocityY;
-    } else {
-      this.velocityX *= 0.7;
-      this.velocityY *= 0.7;
+      this.smoothedPalmX += deltaX * this.smoothingFactor;
+      this.smoothedPalmY += deltaY * this.smoothingFactor;
     }
 
     this.smoothedPalmX = Math.max(0, Math.min(1, this.smoothedPalmX));
@@ -253,6 +251,10 @@ export class HandGestureController {
 
     const fingerCount = this.countExtendedFingers(landmarks);
     const isOpenPalm = fingerCount >= 4;
+
+    const emitDeltaX = Math.abs(this.smoothedPalmX - this.lastEmitX);
+    const emitDeltaY = Math.abs(this.smoothedPalmY - this.lastEmitY);
+    const shouldEmit = emitDeltaX > this.emitThreshold || emitDeltaY > this.emitThreshold;
 
     this.gestureState = {
       palmX: this.smoothedPalmX,
@@ -265,8 +267,12 @@ export class HandGestureController {
 
     if (!this.wasHandDetected) {
       this.wasHandDetected = true;
+      this.lastEmitX = this.smoothedPalmX;
+      this.lastEmitY = this.smoothedPalmY;
       this.emitEvent({ type: 'hand_detected', gestureState: { ...this.gestureState } });
-    } else if (isOpenPalm) {
+    } else if (shouldEmit && isOpenPalm) {
+      this.lastEmitX = this.smoothedPalmX;
+      this.lastEmitY = this.smoothedPalmY;
       this.emitEvent({ type: 'hand_move', gestureState: { ...this.gestureState } });
     }
   }

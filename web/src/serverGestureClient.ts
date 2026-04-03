@@ -283,9 +283,9 @@ export class ServerGestureClient {
     try {
       const constraints: MediaStreamConstraints = {
         video: {
-          width: { min: 160, ideal: 320, max: 640 },
-          height: { min: 120, ideal: 240, max: 480 },
-          frameRate: { ideal: 15, min: 10 },
+          width: { min: 160, ideal: 240, max: 320 },
+          height: { min: 120, ideal: 180, max: 240 },
+          frameRate: { ideal: 60, min: 30 },
         },
         audio: false,
       };
@@ -304,7 +304,7 @@ export class ServerGestureClient {
   private startFrameCapture(): void {
     if (this.frameInterval) return;
 
-    const targetFPS = 15;
+    const targetFPS = 30;
     const interval = 1000 / targetFPS;
 
     this.frameInterval = window.setInterval(() => {
@@ -325,14 +325,14 @@ export class ServerGestureClient {
     }
 
     const now = performance.now();
-    if (now - this.lastFrameTime < 67) {
+    if (now - this.lastFrameTime < 33) {
       return;
     }
     this.lastFrameTime = now;
 
     const canvas = document.createElement('canvas');
-    const targetWidth = 320;
-    const targetHeight = 240;
+    const targetWidth = 160;
+    const targetHeight = 120;
     canvas.width = targetWidth;
     canvas.height = targetHeight;
 
@@ -345,14 +345,14 @@ export class ServerGestureClient {
     ctx.drawImage(this.videoElement, 0, 0, targetWidth, targetHeight);
     ctx.restore();
 
-    const imageData = canvas.toDataURL('image/jpeg', 0.7);
+    const imageData = canvas.toDataURL('image/jpeg', 0.5);
     const base64Data = imageData.split(',')[1];
 
     this.sendFrameForDetection(base64Data);
 
     this.frameCount++;
-    if (this.frameCount % 15 === 0) {
-      this.fps = 1000 / ((now - (this.lastFrameTime - 1000)) / 15);
+    if (this.frameCount % 30 === 0) {
+      this.fps = 30;
     }
   }
 
