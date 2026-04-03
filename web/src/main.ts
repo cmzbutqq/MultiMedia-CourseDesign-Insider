@@ -342,8 +342,16 @@ async function main(): Promise<void> {
     const success = await handGestureController.initialize(handVideo!, handCanvas!);
 
     if (success) {
-      handGestureController.onGesture((event: GestureEvent) => {
+      handGestureController.onGesture((event) => {
         updateGestureOverlay(event);
+        
+        if (event.type === 'hand_move' || event.type === 'hand_detected') {
+          const state = event.gestureState;
+          if (state.handDetected && state.isOpenPalm) {
+            mouseX = state.palmX * canvas.width;
+            mouseY = (1 - state.palmY) * canvas.height;
+          }
+        }
       });
 
       handGestureController.setEnabled(true);
@@ -423,38 +431,12 @@ async function main(): Promise<void> {
     try {
       await handGestureController.processFrame();
     } catch (err) {
-      console.warn('[HandGesture] 处理帧失败:', err);
       return;
     }
 
     const state = handGestureController.getState();
 
-    if (state.handDetected) {
-      const results = handGestureController.getResults();
-      if (results?.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-        const landmarks = results.multiHandLandmarks[0];
-        const palmCenter = landmarks[9];
-        handX = palmCenter.x;
-        handY = palmCenter.y;
-
-        if (state.isPinching && state.isDragging) {
-          mouseX = handX * canvas.width;
-          mouseY = (1 - handY) * canvas.height;
-        }
-
-        if (state.isRotating) {
-          params.cameraRoll += state.rotationAngle;
-          params.cameraRoll = Math.max(-180, Math.min(180, params.cameraRoll));
-        }
-      }
-
-      const gestureName = state.gestureType === 'none' ? '追踪中' :
-                         state.gestureType === 'pinch' ? '捏合' :
-                         state.gestureType === 'drag' ? '拖动' : '旋转';
-      if (handOverlay) {
-        handOverlay.textContent = `手势 [本地]: ${gestureName}`;
-      }
-    } else {
+    if (!state.handDetected) {
       if (handOverlay) {
         handOverlay.textContent = '手势 [本地]: 未检测到手';
       }

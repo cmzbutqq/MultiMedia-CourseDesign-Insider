@@ -6,28 +6,20 @@ import {
 } from '@mediapipe/hands';
 
 export interface GestureState {
-  isPinching: boolean;
-  pinchStrength: number;
-  isDragging: boolean;
-  dragDeltaX: number;
-  dragDeltaY: number;
-  isRotating: boolean;
-  rotationAngle: number;
+  palmX: number;
+  palmY: number;
+  isOpenPalm: boolean;
+  fingerCount: number;
   handDetected: boolean;
   handConfidence: number;
-  gestureType: 'none' | 'pinch' | 'drag' | 'rotate';
 }
 
 export interface GestureEvent {
-  type: 'pinch_start' | 'pinch_end' | 'drag_start' | 'drag_end' | 'rotate' | 'calibrate';
+  type: 'hand_move' | 'hand_detected' | 'hand_lost';
   gestureState: GestureState;
 }
 
 export type GestureCallback = (event: GestureEvent) => void;
-
-const PINCH_THRESHOLD = 0.07;
-const DRAG_THRESHOLD = 0.03;
-const ROTATE_THRESHOLD = 0.05;
 
 export class HandGestureController {
   private hands: Hands | null = null;
@@ -37,25 +29,23 @@ export class HandGestureController {
   private callbacks: GestureCallback[] = [];
   private enabled: boolean = false;
   private isInitialized: boolean = false;
+  private wasHandDetected: boolean = false;
 
-  private isPinching: boolean = false;
-  private prevPalmCenter: { x: number; y: number } | null = null;
-  private isDragging: boolean = false;
-  private prevThumbAngle: number = 0;
-  private isRotating: boolean = false;
-  private lastResults: Results | null = null;
+  private smoothedPalmX: number = 0.5;
+  private smoothedPalmY: number = 0.5;
+  private smoothingFactor: number = 0.08;
+  private palmDeadzone: number = 0.04;
+  private velocityX: number = 0;
+  private velocityY: number = 0;
+  private velocityDamping: number = 0.85;
 
   private gestureState: GestureState = {
-    isPinching: false,
-    pinchStrength: 0,
-    isDragging: false,
-    dragDeltaX: 0,
-    dragDeltaY: 0,
-    isRotating: false,
-    rotationAngle: 0,
+    palmX: 0.5,
+    palmY: 0.5,
+    isOpenPalm: false,
+    fingerCount: 0,
     handDetected: false,
     handConfidence: 0,
-    gestureType: 'none',
   };
 
   constructor() {}
@@ -81,60 +71,35 @@ export class HandGestureController {
       this.hands.setOptions({
         maxNumHands: 1,
         modelComplexity: 0,
-        minDetectionConfidence: 0.7,
+        minDetectionConfidence: 0.5,
         minTrackingConfidence: 0.5,
         runningMode: 'VIDEO',
       } as any);
 
       this.hands.onResults((results: Results) => this.onResults(results));
 
-      console.log('[HandGesture] 正在加载 MediaPipe Hands 模型...');
       await new Promise<void>((resolve) => {
         if ((this.hands as any).initialize) {
           (this.hands as any).initialize().then(() => {
-            console.log('[HandGesture] MediaPipe Hands 模型加载完成');
             resolve();
-          }).catch((err: any) => {
-            console.warn('[HandGesture] MediaPipe Hands 初始化警告:', err);
+          }).catch(() => {
             resolve();
           });
         } else {
-          console.log('[HandGesture] MediaPipe Hands 立即就绪');
           resolve();
         }
       });
 
-      let stream: MediaStream | null = null;
-
-      console.log('[HandGesture] === 摄像头初始化开始 ===');
-      console.log('[HandGesture] navigator.mediaDevices:', navigator.mediaDevices);
-      console.log('[HandGesture] typeof navigator.mediaDevices:', typeof navigator.mediaDevices);
-      if (navigator.mediaDevices) {
-        console.log('[HandGesture] navigator.mediaDevices.getUserMedia:', (navigator.mediaDevices as any).getUserMedia);
-      }
-      console.log('[HandGesture] typeof navigator.mediaDevices?.getUserMedia:', typeof (navigator.mediaDevices as any)?.getUserMedia);
-
-      const getUserMedia = 
+      const getUserMedia =
         typeof navigator.mediaDevices?.getUserMedia === 'function'
           ? navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices)
           : typeof (navigator as any).getUserMedia === 'function'
             ? (navigator as any).getUserMedia.bind(navigator)
-            : typeof (navigator as any).webkitGetUserMedia === 'function'
-              ? (navigator as any).webkitGetUserMedia.bind(navigator)
-              : typeof (navigator as any).mozGetUserMedia === 'function'
-                ? (navigator as any).mozGetUserMedia.bind(navigator)
-                : null;
-
-      console.log('[HandGesture] getUserMedia 函数:', getUserMedia);
-      console.log('[HandGesture] typeof getUserMedia:', typeof getUserMedia);
+            : null;
 
       if (!getUserMedia) {
-        const errMsg = '浏览器不支持 getUserMedia API\n\n当前环境检测：\n- navigator.mediaDevices: ' + (!!navigator.mediaDevices) + '\n- navigator.getUserMedia: ' + (typeof (navigator as any).getUserMedia) + '\n\n可能原因：\n1. 在 Docker/无头浏览器环境中运行\n2. 浏览器不支持摄像头 API\n3. 需要 HTTPS 或 localhost\n\n解决方案：\n在宿主机浏览器中直接访问 http://localhost:5174';
-        
-        console.error('[HandGesture]', errMsg);
-        console.error('[HandGesture] 错误详情:', errMsg);
-        alert(errMsg);
-        throw new Error('浏览器不支持 getUserMedia API');
+        console.error('[HandGesture] 浏览器不支持 getUserMedia API');
+        return false;
       }
 
       const constraints: MediaStreamConstraints = {
@@ -147,50 +112,25 @@ export class HandGestureController {
       };
 
       try {
-        console.log('[HandGesture] 正在请求摄像头权限...');
-        console.log('[HandGesture] 尝试约束:', JSON.stringify(constraints));
-        stream = await getUserMedia(constraints);
-        console.log('[HandGesture] 摄像头权限已获得');
+        const stream = await getUserMedia(constraints);
+        this.videoElement!.srcObject = stream;
+        await this.videoElement!.play();
       } catch (err) {
-        console.warn('[HandGesture] 带约束的请求失败，尝试简化约束...', err);
-        try {
-          stream = await getUserMedia({ video: true, audio: false });
-          console.log('[HandGesture] 简化约束下摄像头权限已获得');
-        } catch (err2) {
-          console.warn('[HandGesture] 简化约束也失败，尝试任意约束...', err2);
-          stream = await getUserMedia({ video: undefined, audio: false });
-          console.log('[HandGesture] 任意视频约束下摄像头权限已获得');
-        }
+        console.error('[HandGesture] 摄像头初始化失败');
+        return false;
       }
-
-      this.videoElement.srcObject = stream;
-      await this.videoElement.play();
 
       this.isInitialized = true;
       console.log('[HandGesture] 手势控制初始化成功');
-      console.log('[HandGesture] 视频元素状态:', {
-        readyState: this.videoElement.readyState,
-        videoWidth: this.videoElement.videoWidth,
-        videoHeight: this.videoElement.videoHeight,
-        paused: this.videoElement.paused,
-        ended: this.videoElement.ended,
-      });
-      console.log('[HandGesture] MediaPipe Hands 已准备好，请将手放到摄像头前...');
       return true;
     } catch (error) {
       console.error('[HandGesture] 初始化失败:', error);
-      if (error instanceof Error) {
-        console.error('[HandGesture] 错误详情:', error.message);
-      }
       return false;
     }
   }
 
-  private async onResults(results: Results): Promise<void> {
-    this.lastResults = results;
-
-    console.log('[HandGesture] onResults 被调用');
-    console.log('[HandGesture] 检测到手数量:', results.multiHandLandmarks?.length || 0);
+  private onResults(results: Results): void {
+    if (!this.enabled) return;
 
     if (this.canvasCtx && this.canvasElement) {
       this.drawHandLandmarks(results);
@@ -198,18 +138,25 @@ export class HandGestureController {
 
     if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
       const landmarks = results.multiHandLandmarks[0];
-      console.log('[HandGesture] 检测到手部关键点数量:', landmarks.length);
-      
-      if (landmarks.length >= 10) {
+
+      if (landmarks.length >= 21) {
         this.processGestures(landmarks);
       } else {
-        console.warn('[HandGesture] 关键点不足，跳过手势识别');
-        this.resetGestureState();
+        this.handleHandLost();
       }
     } else {
-      console.log('[HandGesture] 未检测到手');
-      this.resetGestureState();
+      this.handleHandLost();
     }
+  }
+
+  private handleHandLost(): void {
+    if (this.wasHandDetected) {
+      this.wasHandDetected = false;
+      this.emitEvent({ type: 'hand_lost', gestureState: { ...this.gestureState } });
+    }
+    this.velocityX *= 0.5;
+    this.velocityY *= 0.5;
+    this.resetGestureState();
   }
 
   private drawHandLandmarks(results: Results): void {
@@ -251,7 +198,6 @@ export class HandGestureController {
     for (const [start, end] of connections) {
       const startPoint = landmarks[start];
       const endPoint = landmarks[end];
-
       if (!startPoint || !endPoint) continue;
 
       ctx.beginPath();
@@ -282,142 +228,114 @@ export class HandGestureController {
   }
 
   private processGestures(landmarks: NormalizedLandmark[]): void {
-    const thumbTip = landmarks[4];
-    const indexTip = landmarks[8];
     const palmCenter = landmarks[9];
 
-    const pinchDist = this.getDistance(thumbTip, indexTip);
+    const rawPalmX = palmCenter.x;
+    const rawPalmY = palmCenter.y;
 
-    if (pinchDist < PINCH_THRESHOLD && !this.isPinching) {
-      this.isPinching = true;
-      this.emitEvent({ type: 'pinch_start', gestureState: { ...this.gestureState } });
-    } else if (pinchDist >= PINCH_THRESHOLD && this.isPinching) {
-      this.isPinching = false;
-      this.emitEvent({ type: 'pinch_end', gestureState: { ...this.gestureState } });
-    }
+    const deltaX = rawPalmX - this.smoothedPalmX;
+    const deltaY = rawPalmY - this.smoothedPalmY;
+    const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
 
-    if (this.prevPalmCenter && this.isPinching) {
-      const dx = palmCenter.x - this.prevPalmCenter.x;
-      const dy = palmCenter.y - this.prevPalmCenter.y;
+    if (distance > this.palmDeadzone) {
+      this.velocityX = this.velocityX * this.velocityDamping + deltaX * this.smoothingFactor;
+      this.velocityY = this.velocityY * this.velocityDamping + deltaY * this.smoothingFactor;
 
-      if (!this.isDragging && (Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD)) {
-        this.isDragging = true;
-        this.emitEvent({ type: 'drag_start', gestureState: { ...this.gestureState } });
-      }
-
-      if (this.isDragging) {
-        this.gestureState.dragDeltaX = dx * 100;
-        this.gestureState.dragDeltaY = dy * 100;
-      }
-    }
-
-    if (this.isDragging && !this.isPinching) {
-      this.isDragging = false;
-      this.emitEvent({ type: 'drag_end', gestureState: { ...this.gestureState } });
-      this.gestureState.dragDeltaX = 0;
-      this.gestureState.dragDeltaY = 0;
-    }
-
-    const thumbAngle = Math.atan2(
-      landmarks[4].y - landmarks[3].y,
-      landmarks[4].x - landmarks[3].x,
-    );
-    if (this.prevThumbAngle !== null) {
-      let angleDiff = thumbAngle - this.prevThumbAngle;
-      if (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
-      if (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
-
-      if (Math.abs(angleDiff) > ROTATE_THRESHOLD) {
-        if (!this.isRotating) {
-          this.isRotating = true;
-        }
-        this.gestureState.rotationAngle = angleDiff * 50;
-        this.emitEvent({ type: 'rotate', gestureState: { ...this.gestureState } });
-      } else if (this.isRotating) {
-        this.isRotating = false;
-        this.gestureState.rotationAngle = 0;
-      }
-    }
-
-    this.prevPalmCenter = { x: palmCenter.x, y: palmCenter.y };
-    this.prevThumbAngle = thumbAngle;
-
-    this.gestureState.isPinching = this.isPinching;
-    this.gestureState.pinchStrength = 1 - Math.min(pinchDist / PINCH_THRESHOLD, 1);
-    this.gestureState.isDragging = this.isDragging;
-    this.gestureState.isRotating = this.isRotating;
-    this.gestureState.handDetected = true;
-
-    if (this.isPinching) {
-      this.gestureState.gestureType = this.isDragging ? 'drag' : 'pinch';
-    } else if (this.isRotating) {
-      this.gestureState.gestureType = 'rotate';
+      this.smoothedPalmX += this.velocityX;
+      this.smoothedPalmY += this.velocityY;
     } else {
-      this.gestureState.gestureType = 'none';
+      this.velocityX *= 0.7;
+      this.velocityY *= 0.7;
     }
 
-    this.update();
+    this.smoothedPalmX = Math.max(0, Math.min(1, this.smoothedPalmX));
+    this.smoothedPalmY = Math.max(0, Math.min(1, this.smoothedPalmY));
+
+    const fingerCount = this.countExtendedFingers(landmarks);
+    const isOpenPalm = fingerCount >= 4;
+
+    this.gestureState = {
+      palmX: this.smoothedPalmX,
+      palmY: this.smoothedPalmY,
+      isOpenPalm,
+      fingerCount,
+      handDetected: true,
+      handConfidence: 0.8,
+    };
+
+    if (!this.wasHandDetected) {
+      this.wasHandDetected = true;
+      this.emitEvent({ type: 'hand_detected', gestureState: { ...this.gestureState } });
+    } else if (isOpenPalm) {
+      this.emitEvent({ type: 'hand_move', gestureState: { ...this.gestureState } });
+    }
   }
 
-  private getDistance(a: NormalizedLandmark, b: NormalizedLandmark): number {
-    const dx = a.x - b.x;
-    const dy = a.y - b.y;
-    const dz = (a.z || 0) - (b.z || 0);
-    return Math.sqrt(dx * dx + dy * dy + dz * dz);
+  private countExtendedFingers(landmarks: NormalizedLandmark[]): number {
+    const fingerTips = [8, 12, 16, 20];
+    const fingerMids = [6, 10, 14, 18];
+
+    let extendedCount = 0;
+
+    for (let i = 0; i < fingerTips.length; i++) {
+      const tip = landmarks[fingerTips[i]];
+      const mid = landmarks[fingerMids[i]];
+      const pip = landmarks[fingerMids[i] - 1];
+
+      if (tip.y < mid.y && tip.y < pip.y) {
+        extendedCount++;
+      }
+    }
+
+    const thumbTip = landmarks[4];
+    const thumbIp = landmarks[3];
+    const wrist = landmarks[0];
+
+    const thumbExtended = Math.abs(thumbTip.x - wrist.x) > Math.abs(thumbIp.x - wrist.x);
+    if (thumbExtended) {
+      extendedCount++;
+    }
+
+    return extendedCount;
   }
 
   private resetGestureState(): void {
-    const wasHandDetected = this.gestureState.handDetected;
-
     this.gestureState = {
-      isPinching: false,
-      pinchStrength: 0,
-      isDragging: false,
-      dragDeltaX: 0,
-      dragDeltaY: 0,
-      isRotating: false,
-      rotationAngle: 0,
+      palmX: 0.5,
+      palmY: 0.5,
+      isOpenPalm: false,
+      fingerCount: 0,
       handDetected: false,
       handConfidence: 0,
-      gestureType: 'none',
     };
-
-    this.isPinching = false;
-    this.isDragging = false;
-    this.isRotating = false;
-    this.prevPalmCenter = null;
-    this.prevThumbAngle = 0;
-
-    if (wasHandDetected) {
-      this.emitEvent({ type: 'drag_end', gestureState: { ...this.gestureState } });
-    }
-  }
-
-  private update(): void {
-    if (this.hands && this.videoElement && this.enabled) {
-      this.hands.send({ image: this.videoElement });
-    }
   }
 
   async processFrame(): Promise<void> {
-    if (this.hands && this.videoElement && this.enabled) {
-      if (this.videoElement.readyState < 2) {
-        console.warn('[HandGesture] 视频尚未准备好:', this.videoElement.readyState);
-        return;
-      }
-      try {
-        console.log('[HandGesture] processFrame: 发送帧到 MediaPipe...');
-        await this.hands.send({ image: this.videoElement });
-        console.log('[HandGesture] processFrame: 帧处理完成');
-      } catch (err) {
-        console.warn('[HandGesture] MediaPipe 处理帧失败:', err);
-      }
-    } else {
-      console.warn('[HandGesture] processFrame: 条件不满足', {
-        hasHands: !!this.hands,
-        hasVideo: !!this.videoElement,
-        enabled: this.enabled,
-      });
+    if (!this.enabled || !this.hands || !this.videoElement) return;
+
+    try {
+      await this.hands.send({ image: this.videoElement });
+    } catch (err) {
+      console.warn('[HandGesture] 处理帧失败');
+    }
+  }
+
+  setEnabled(enabled: boolean): void {
+    this.enabled = enabled;
+    if (!enabled) {
+      this.resetGestureState();
+      this.wasHandDetected = false;
+    }
+  }
+
+  onGesture(callback: GestureCallback): void {
+    this.callbacks.push(callback);
+  }
+
+  removeCallback(callback: GestureCallback): void {
+    const index = this.callbacks.indexOf(callback);
+    if (index !== -1) {
+      this.callbacks.splice(index, 1);
     }
   }
 
@@ -427,28 +345,6 @@ export class HandGestureController {
     }
   }
 
-  onGesture(callback: GestureCallback): void {
-    this.callbacks.push(callback);
-  }
-
-  offGesture(callback: GestureCallback): void {
-    const index = this.callbacks.indexOf(callback);
-    if (index > -1) {
-      this.callbacks.splice(index, 1);
-    }
-  }
-
-  setEnabled(enabled: boolean): void {
-    this.enabled = enabled;
-    if (enabled && this.isInitialized) {
-      this.update();
-    }
-  }
-
-  isEnabled(): boolean {
-    return this.enabled;
-  }
-
   getState(): GestureState {
     return { ...this.gestureState };
   }
@@ -456,23 +352,4 @@ export class HandGestureController {
   getResults(): Results | null {
     return this.lastResults;
   }
-
-  destroy(): void {
-    this.enabled = false;
-    this.callbacks = [];
-
-    if (this.videoElement?.srcObject) {
-      const stream = this.videoElement.srcObject as MediaStream;
-      stream.getTracks().forEach((track) => track.stop());
-      this.videoElement.srcObject = null;
-    }
-
-    this.hands?.close();
-    this.hands = null;
-    this.isInitialized = false;
-  }
-}
-
-export function createHandGestureController(): HandGestureController {
-  return new HandGestureController();
 }

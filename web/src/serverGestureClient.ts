@@ -33,6 +33,13 @@ export class ServerGestureClient {
   private fps: number = 0;
   private config: ServerConfig;
   private wasHandDetected: boolean = false;
+  private smoothedPalmX: number = 0.5;
+  private smoothedPalmY: number = 0.5;
+  private smoothingFactor: number = 0.08;
+  private palmDeadzone: number = 0.04;
+  private velocityX: number = 0;
+  private velocityY: number = 0;
+  private velocityDamping: number = 0.85;
 
   private gestureState: GestureState = {
     palmX: 0.5,
@@ -49,6 +56,18 @@ export class ServerGestureClient {
       port: config?.port || 5000,
       useSSL: false,
     };
+  }
+
+  public setSmoothingFactor(factor: number): void {
+    this.smoothingFactor = Math.max(0.05, Math.min(0.5, factor));
+  }
+
+  public setDeadzone(deadzone: number): void {
+    this.palmDeadzone = Math.max(0, Math.min(0.1, deadzone));
+  }
+
+  public getSmoothedPosition(): { x: number; y: number } {
+    return { x: this.smoothedPalmX, y: this.smoothedPalmY };
   }
 
   async initialize(
@@ -146,12 +165,30 @@ export class ServerGestureClient {
     }
 
     if (hand_detected && gesture) {
-      const prevPalmX = this.gestureState.palmX;
-      const prevPalmY = this.gestureState.palmY;
+      const rawPalmX = gesture.palm_x ?? 0.5;
+      const rawPalmY = gesture.palm_y ?? 0.5;
+
+      const deltaX = rawPalmX - this.smoothedPalmX;
+      const deltaY = rawPalmY - this.smoothedPalmY;
+      const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+
+      if (distance > this.palmDeadzone) {
+        this.velocityX = this.velocityX * this.velocityDamping + deltaX * this.smoothingFactor;
+        this.velocityY = this.velocityY * this.velocityDamping + deltaY * this.smoothingFactor;
+        
+        this.smoothedPalmX += this.velocityX;
+        this.smoothedPalmY += this.velocityY;
+      } else {
+        this.velocityX *= 0.7;
+        this.velocityY *= 0.7;
+      }
+
+      this.smoothedPalmX = Math.max(0, Math.min(1, this.smoothedPalmX));
+      this.smoothedPalmY = Math.max(0, Math.min(1, this.smoothedPalmY));
 
       this.gestureState = {
-        palmX: gesture.palm_x || 0.5,
-        palmY: gesture.palm_y || 0.5,
+        palmX: this.smoothedPalmX,
+        palmY: this.smoothedPalmY,
         isOpenPalm: gesture.is_open_palm || false,
         fingerCount: gesture.finger_count || 0,
         handDetected: true,
@@ -169,6 +206,8 @@ export class ServerGestureClient {
         this.wasHandDetected = false;
         this.emitEvent({ type: 'hand_lost', gestureState: { ...this.gestureState } });
       }
+      this.velocityX *= 0.5;
+      this.velocityY *= 0.5;
       this.resetGestureState();
     }
   }
