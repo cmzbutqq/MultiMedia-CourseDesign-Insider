@@ -107,20 +107,48 @@ export class HandGestureController {
       }
 
       const constraints: MediaStreamConstraints = {
-        video: {
-          width: { min: 160, ideal: 240, max: 320 },
-          height: { min: 120, ideal: 180, max: 240 },
-          frameRate: { ideal: 30, min: 20 },
-        },
+        video: true,
         audio: false,
       };
 
       try {
+        console.log('[HandGesture] 请求摄像头访问...');
         const stream = await getUserMedia(constraints);
+        console.log('[HandGesture] 摄像头流已获取, track数量:', stream.getVideoTracks().length);
+
         this.videoElement!.srcObject = stream;
-        await this.videoElement!.play();
+
+        // 等待视频加载
+        await new Promise<void>((resolve, reject) => {
+          if (this.videoElement!.readyState >= 2) {
+            resolve();
+            return;
+          }
+          const timeout = setTimeout(() => reject(new Error('视频加载超时')), 10000);
+          this.videoElement!.onloadedmetadata = () => {
+            clearTimeout(timeout);
+            console.log('[HandGesture] 元数据加载完成，视频尺寸:', this.videoElement!.videoWidth, 'x', this.videoElement!.videoHeight);
+            resolve();
+          };
+          this.videoElement!.onerror = () => {
+            clearTimeout(timeout);
+            reject(new Error('视频加载错误'));
+          };
+        });
+
+        // 尝试播放，忽略自动播放被阻止的错误
+        try {
+          await this.videoElement!.play();
+          console.log('[HandGesture] 视频播放成功');
+        } catch (playErr) {
+          console.warn('[HandGesture] play()被阻止或失败:', playErr);
+          // 继续，因为流已经获取到了
+        }
+
+        console.log('[HandGesture] 摄像头初始化成功');
+        return true;
       } catch (err) {
-        console.error('[HandGesture] 摄像头初始化失败');
+        console.error('[HandGesture] 摄像头初始化失败:', err);
         return false;
       }
 
@@ -322,7 +350,7 @@ export class HandGestureController {
     try {
       await this.hands.send({ image: this.videoElement });
     } catch (err) {
-      console.warn('[HandGesture] 处理帧失败');
+      // Silently ignore errors when disabled or during shutdown
     }
   }
 
@@ -332,6 +360,23 @@ export class HandGestureController {
       this.resetGestureState();
       this.wasHandDetected = false;
     }
+  }
+
+  destroy(): void {
+    this.enabled = false;
+    if (this.hands) {
+      try {
+        this.hands.close();
+      } catch (e) {
+        // Ignore close errors
+      }
+      this.hands = null;
+    }
+    this.resetGestureState();
+    this.wasHandDetected = false;
+    this.callbacks = [];
+    this.isInitialized = false;
+    console.log('[HandGesture] 已销毁');
   }
 
   onGesture(callback: GestureCallback): void {

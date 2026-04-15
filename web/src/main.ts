@@ -39,6 +39,9 @@ type GestureMode = 'local' | 'server';
 
 interface Params {
   antialias: AntialiasMode;
+  fxaaQuality: 0 | 1 | 2; // 0=Low, 1=Medium, 2=High
+  msaaSamples: 0 | 2 | 4 | 8;
+  taaFeedback: number;
   gravatationalLensing: boolean;
   renderBlackHole: boolean;
   mouseControl: boolean;
@@ -64,11 +67,14 @@ interface Params {
 
 const params: Params = {
   antialias: 'fxaa',
+  fxaaQuality: 2,
+  msaaSamples: 4,
+  taaFeedback: 8,
   gravatationalLensing: true,
   renderBlackHole: true,
   mouseControl: true,
   handControl: false,
-  gestureMode: 'server',
+  gestureMode: 'local',
   cameraRoll: 0,
   frontView: false,
   topView: false,
@@ -126,9 +132,10 @@ function allocPipeline(
   height: number,
   format: ColorRTFormat,
   aaMode: AntialiasMode,
+  msaaSamples: number,
 ): PipelineRTs {
   const main = createColorRT(gl, width, height, format);
-  const mainMsaa = aaMode === 'taa' ? createMSAART(gl, width, height, format, MSAASAMPLES) : null;
+  const mainMsaa = aaMode === 'taa' ? createMSAART(gl, width, height, format, msaaSamples) : null;
   const mainResolved = mainMsaa ? createColorRT(gl, width, height, format) : null;
   const brightness = createColorRT(gl, width, height, format);
   const bloomFinal = createColorRT(gl, width, height, format);
@@ -155,13 +162,14 @@ function tryAllocPipeline(
   width: number,
   height: number,
   aaMode: AntialiasMode,
+  msaaSamples: number,
 ): { pipeline: PipelineRTs; format: ColorRTFormat } {
   const preferred = detectRTFormat(gl);
   try {
-    return { pipeline: allocPipeline(gl, width, height, preferred, aaMode), format: preferred };
+    return { pipeline: allocPipeline(gl, width, height, preferred, aaMode, msaaSamples), format: preferred };
   } catch {
     if (preferred === 'float16') {
-      return { pipeline: allocPipeline(gl, width, height, 'rgba8', aaMode), format: 'rgba8' };
+      return { pipeline: allocPipeline(gl, width, height, 'rgba8', aaMode, msaaSamples), format: 'rgba8' };
     }
     throw new Error('无法创建离屏渲染目标');
   }
@@ -284,6 +292,9 @@ async function main(): Promise<void> {
 
   setI1(gl, passes.passthrough.program, passes.passthrough.uniforms, 'texture0', 0);
   setI1(gl, passes.fxaa.program, passes.fxaa.uniforms, 'texture0', 0);
+  setI1(gl, passes.fxaa.program, passes.fxaa.uniforms, 'fxaaQuality', params.fxaaQuality);
+  setF(gl, passes.taaBlend.program, passes.taaBlend.uniforms, 'taaFeedback', params.taaFeedback);
+  setF(gl, passes.taaBlend.program, passes.taaBlend.uniforms, 'firstFrame', 1.0);
 
   let mouseX = 0;
   let mouseY = 0;
@@ -310,6 +321,7 @@ async function main(): Promise<void> {
       handVideo.style.cssText = 'position:fixed;bottom:10px;left:10px;width:160px;height:120px;border:2px solid #00ff00;border-radius:8px;opacity:0.8;z-index:1000;transform:scaleX(-1);';
       handVideo.playsInline = true;
       handVideo.muted = true;
+      handVideo.autoplay = true;
 
       handCanvas = document.createElement('canvas');
       handCanvas.width = 160;
@@ -323,6 +335,9 @@ async function main(): Promise<void> {
       document.body.appendChild(handVideo);
       document.body.appendChild(handCanvas);
       document.body.appendChild(handOverlay);
+
+      // 等待DOM完全渲染
+      await new Promise(resolve => setTimeout(resolve, 100));
 
       if (params.gestureMode === 'server') {
         return await initServerGesture();
@@ -366,10 +381,15 @@ async function main(): Promise<void> {
   }
 
   async function initServerGesture(): Promise<boolean> {
+    // 通过 nginx 代理连接服务器（Docker 环境中）
+    // HTTP 代理: localhost:8080, HTTPS 代理: localhost:8443
+    const isHTTPS = window.location.protocol === 'https:';
+    console.log('[ServerGesture] window.location.protocol:', window.location.protocol);
+    console.log('[ServerGesture] isHTTPS:', isHTTPS);
     serverGestureClient = new ServerGestureClient({
       host: 'localhost',
-      port: 5000,
-      useSSL: false,
+      port: isHTTPS ? 8443 : 8080,
+      useSSL: isHTTPS,
     });
 
     const success = await serverGestureClient.initialize(handVideo!, handCanvas!);
@@ -445,16 +465,21 @@ async function main(): Promise<void> {
 
   let pipeline: PipelineRTs | null = null;
   let rtFormat: ColorRTFormat = 'rgba8';
+  let lastMsaaSamples = params.msaaSamples;
 
   function resizeNow(): void {
     const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
     const w = Math.max(1, Math.floor(canvas.clientWidth * dpr));
     const h = Math.max(1, Math.floor(canvas.clientHeight * dpr));
-    if (canvas.width === w && canvas.height === h && pipeline) return;
+    const needsMsaaRebuild = pipeline && params.msaaSamples !== lastMsaaSamples;
+    if (canvas.width === w && canvas.height === h && pipeline && !needsMsaaRebuild) return;
+    if (needsMsaaRebuild) {
+      lastMsaaSamples = params.msaaSamples;
+    }
     canvas.width = w;
     canvas.height = h;
     destroyPipeline(gl, pipeline);
-    const r = tryAllocPipeline(gl, w, h, params.antialias);
+    const r = tryAllocPipeline(gl, w, h, params.antialias, params.msaaSamples);
     pipeline = r.pipeline;
     rtFormat = r.format;
     if (rtFormat === 'rgba8') {
@@ -477,7 +502,29 @@ async function main(): Promise<void> {
     '关闭 (Off)': 'off',
     '快速边缘平滑 (FXAA)': 'fxaa',
     '时序抗锯齿 (TAA)': 'taa',
-  }).name('抗锯齿');
+  }).name('抗锯齿').onChange(() => resizeNow());
+
+  gui.add(params, 'fxaaQuality', {
+    '低 (Low)': 0,
+    '中 (Medium)': 1,
+    '高 (High)': 2,
+  }).name('FXAA质量').onChange(() => {
+    if (passes.fxaa) {
+      setI1(gl, passes.fxaa.program, passes.fxaa.uniforms, 'fxaaQuality', params.fxaaQuality);
+    }
+  });
+
+  gui.add(params, 'msaaSamples', {
+    '2x': 2,
+    '4x': 4,
+    '8x': 8,
+  }).name('MSAA采样').onChange(() => resizeNow());
+
+  gui.add(params, 'taaFeedback', 1, 20, 0.5).name('TAA反馈').onChange(() => {
+    if (passes.taaBlend) {
+      setF(gl, passes.taaBlend.program, passes.taaBlend.uniforms, 'taaFeedback', params.taaFeedback);
+    }
+  });
 
   gui.add(params, 'gravatationalLensing');
   gui.add(params, 'renderBlackHole');
@@ -485,7 +532,49 @@ async function main(): Promise<void> {
   gui.add(params, 'gestureMode', {
     '本地模式': 'local',
     '服务器模式': 'server',
-  }).name('手势识别模式');
+  }).name('手势识别模式').onChange(async () => {
+    if (params.handControl) {
+      if (params.gestureMode === 'server') {
+        // Switching to server mode - destroy local controller completely
+        if (handGestureController) {
+          handGestureController.destroy();
+          handGestureController = null;
+        }
+        // Clean up DOM elements before creating new ones
+        handVideo?.remove();
+        handCanvas?.remove();
+        handOverlay?.remove();
+        handVideo = null;
+        handCanvas = null;
+        handOverlay = null;
+        // Reinitialize server client
+        const success = await initHandGesture();
+        if (!success) {
+          params.handControl = false;
+          return;
+        }
+      } else {
+        // Switching to local mode - destroy server client completely
+        if (serverGestureClient) {
+          serverGestureClient.destroy();
+          serverGestureClient = null;
+        }
+        // Clean up DOM elements before creating new ones
+        handVideo?.remove();
+        handCanvas?.remove();
+        handOverlay?.remove();
+        handVideo = null;
+        handCanvas = null;
+        handOverlay = null;
+        // Reinitialize local controller
+        const success = await initHandGesture();
+        if (!success) {
+          params.handControl = false;
+          return;
+        }
+      }
+    }
+  });
   gui.add(params, 'handControl').name('手势控制').onChange(async (enabled: boolean) => {
     if (enabled) {
       if (params.gestureMode === 'server') {
@@ -601,6 +690,7 @@ async function main(): Promise<void> {
           setI1(gl, p.program, p.uniforms, 'texture0', 0);
           setI1(gl, p.program, p.uniforms, 'texture1', 1);
           setF(gl, p.program, p.uniforms, 'firstFrame', 0.0);
+          setF(gl, p.program, p.uniforms, 'taaFeedback', params.taaFeedback);
           gl.activeTexture(gl.TEXTURE0);
           gl.bindTexture(gl.TEXTURE_2D, sceneTex);
           gl.activeTexture(gl.TEXTURE1);
@@ -672,6 +762,7 @@ async function main(): Promise<void> {
     if (aaMode === 'fxaa') {
       drawPass(gl, vao, passes.fxaa, output.fbo, rw, rh, time, () => {
         setI1(gl, passes.fxaa.program, passes.fxaa.uniforms, 'texture0', 0);
+        setI1(gl, passes.fxaa.program, passes.fxaa.uniforms, 'fxaaQuality', params.fxaaQuality);
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, aaInputTex);
       });

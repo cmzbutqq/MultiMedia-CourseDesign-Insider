@@ -7,6 +7,7 @@ out vec4 fragColor;
 uniform sampler2D texture0;
 uniform sampler2D texture1;
 uniform float firstFrame;
+uniform float taaFeedback; // Controls history blending (0.05-0.95)
 
 float luma(vec3 c) {
   return dot(c, vec3(0.299, 0.587, 0.114));
@@ -26,7 +27,8 @@ void main() {
   float lumaCurrent = luma(current);
   float lumaHistory = luma(history);
 
-  float weight = 1.0 / (1.0 + abs(lumaCurrent - lumaHistory) * 8.0);
+  // Higher feedback = more ghosting but smoother; lower = sharper but more jitter
+  float weight = 1.0 / (1.0 + abs(lumaCurrent - lumaHistory) * taaFeedback);
   weight = clamp(weight, 0.05, 0.95);
 
   vec3 blended = mix(current, history, weight);

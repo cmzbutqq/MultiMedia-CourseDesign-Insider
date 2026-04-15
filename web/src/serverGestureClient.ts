@@ -107,9 +107,9 @@ export class ServerGestureClient {
 
   private async checkServerConnection(): Promise<boolean> {
     try {
-      const protocol = this.config.useSSL ? 'https' : 'http';
-      const url = `${protocol}://${this.config.host}:${this.config.port}/health`;
-      
+      // 使用相对路径，通过nginx代理访问服务器
+      const url = `/health`;
+
       console.log(`[ServerGesture] 检查服务器连接: ${url}`);
       const response = await fetch(url);
       
@@ -129,9 +129,9 @@ export class ServerGestureClient {
 
   private async sendFrameForDetection(imageData: string): Promise<void> {
     try {
-      const protocol = this.config.useSSL ? 'https' : 'http';
-      const url = `${protocol}://${this.config.host}:${this.config.port}/api/detect`;
-      
+      // 使用相对路径，通过nginx代理访问服务器
+      const url = `/api/detect`;
+
       const response = await fetch(url, {
         method: 'POST',
         headers: {
@@ -281,18 +281,44 @@ export class ServerGestureClient {
     }
 
     try {
+      // 简化摄像头约束，避免过高分辨率导致超时
       const constraints: MediaStreamConstraints = {
-        video: {
-          width: { min: 160, ideal: 240, max: 320 },
-          height: { min: 120, ideal: 180, max: 240 },
-          frameRate: { ideal: 60, min: 30 },
-        },
+        video: true,
         audio: false,
       };
 
+      console.log('[ServerGesture] 请求摄像头访问...');
       const stream = await getUserMedia(constraints);
+      console.log('[ServerGesture] 摄像头流已获取, track数量:', stream.getVideoTracks().length);
       this.videoElement!.srcObject = stream;
-      await this.videoElement!.play();
+
+      // 等待视频加载
+      await new Promise<void>((resolve, reject) => {
+        if (this.videoElement!.readyState >= 2) {
+          resolve();
+          return;
+        }
+        const timeout = setTimeout(() => reject(new Error('视频加载超时')), 10000);
+        this.videoElement!.onloadedmetadata = () => {
+          clearTimeout(timeout);
+          console.log('[ServerGesture] 元数据加载完成，视频尺寸:', this.videoElement!.videoWidth, 'x', this.videoElement!.videoHeight);
+          resolve();
+        };
+        this.videoElement!.onerror = () => {
+          clearTimeout(timeout);
+          reject(new Error('视频加载错误'));
+        };
+      });
+
+      // 尝试播放，忽略自动播放被阻止的错误
+      try {
+        await this.videoElement!.play();
+        console.log('[ServerGesture] 视频播放成功');
+      } catch (playErr) {
+        console.warn('[ServerGesture] play()被阻止或失败:', playErr);
+        // 继续，因为流已经获取到了
+      }
+
       console.log('[ServerGesture] 摄像头初始化成功');
       return true;
     } catch (error) {
