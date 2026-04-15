@@ -32,13 +32,17 @@ echo "检查 GPU 支持..."
 echo "=========================================="
 
 python3 -c "
-import torch
-if torch.cuda.is_available():
-    print(f'✓ GPU 可用: {torch.cuda.get_device_name(0)}')
-    print(f'  CUDA 版本: {torch.version.cuda}')
-    print(f'  GPU 数量: {torch.cuda.device_count()}')
+try:
+    import torch
+except ModuleNotFoundError:
+    print('⚠ 未安装 torch，跳过 CUDA 探测（服务仍可运行）')
 else:
-    print('⚠ GPU 不可用，将使用 CPU')
+    if torch.cuda.is_available():
+        print(f'✓ GPU 可用: {torch.cuda.get_device_name(0)}')
+        print(f'  CUDA 版本: {torch.version.cuda}')
+        print(f'  GPU 数量: {torch.cuda.device_count()}')
+    else:
+        print('⚠ GPU 不可用，将使用 CPU')
 "
 
 echo ""
