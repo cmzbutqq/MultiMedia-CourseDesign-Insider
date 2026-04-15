@@ -1,4 +1,4 @@
-FROM python:3.10-slim
+FROM python:3.10-bookworm
 
 LABEL maintainer="Blackhole Web Project"
 LABEL description="GPU-accelerated hand gesture recognition server"
@@ -7,6 +7,7 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y \
     wget \
+    curl \
     libgl1 \
     libegl1 \
     libgles2 \
