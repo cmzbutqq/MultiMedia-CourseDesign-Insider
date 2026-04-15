@@ -305,6 +305,27 @@ function bindSceneUniforms(
   }
 }
 
+function syncUiSceneFromScene(
+  uiScene: {
+    dynamics: SceneState['dynamics'];
+    bodyCount: number;
+    gmCentral: number;
+    nbodyG: number;
+    softening: number;
+    dt: number;
+    showTrails: boolean;
+  },
+  scene: SceneState,
+): void {
+  uiScene.bodyCount = scene.bodyCount;
+  uiScene.dynamics = scene.dynamics;
+  uiScene.gmCentral = scene.gmCentral;
+  uiScene.nbodyG = scene.nbodyG;
+  uiScene.softening = scene.softening;
+  uiScene.dt = scene.dt;
+  uiScene.showTrails = scene.showTrails;
+}
+
 async function main(): Promise<void> {
   const canvas = document.getElementById('c') as HTMLCanvasElement;
   const trailCanvas = document.getElementById('trail') as HTMLCanvasElement | null;
@@ -468,13 +489,7 @@ async function main(): Promise<void> {
     if (!snap) return;
     applySceneState(scene, cloneSceneState(snap));
     initialSnapshot = cloneSceneState(scene);
-    uiScene.bodyCount = scene.bodyCount;
-    uiScene.dynamics = scene.dynamics;
-    uiScene.gmCentral = scene.gmCentral;
-    uiScene.nbodyG = scene.nbodyG;
-    uiScene.softening = scene.softening;
-    uiScene.dt = scene.dt;
-    uiScene.showTrails = scene.showTrails;
+    syncUiSceneFromScene(uiScene, scene);
     gui.controllersRecursive().forEach((c) => c.updateDisplay());
     syncBodyFolders();
     trails.reset();
@@ -490,8 +505,7 @@ async function main(): Promise<void> {
     {
       reset() {
         applySceneState(scene, cloneSceneState(initialSnapshot));
-        uiScene.bodyCount = scene.bodyCount;
-        uiScene.dynamics = scene.dynamics;
+        syncUiSceneFromScene(uiScene, scene);
         gui.controllersRecursive().forEach((c) => c.updateDisplay());
         syncBodyFolders();
         trails.reset();

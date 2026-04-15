@@ -82,6 +82,7 @@ export function worldToScreenPx(
   const puvX = -xc / (zc * fovScale);
   const puvY = yc / (zc * fovScale);
   const px = width * 0.5 + puvX * height;
-  const py = height * (puvY + 0.5);
+  // Canvas2D 的 y 轴向下，需将相机空间 y 投影翻转到屏幕坐标。
+  const py = height * (0.5 - puvY);
   return { x: px, y: py };
 }
