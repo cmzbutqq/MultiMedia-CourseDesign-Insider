@@ -110,11 +110,10 @@ function stepNBody(state: SceneState): void {
   }
 
   for (let i = 0; i < n; i++) {
-    const a0 = acc0[i]!;
     const a1 = acc1[i]!;
-    b[i].velocity[0] += 0.5 * (a0[0] + a1[0]) * dt;
-    b[i].velocity[1] += 0.5 * (a0[1] + a1[1]) * dt;
-    b[i].velocity[2] += 0.5 * (a0[2] + a1[2]) * dt;
+    b[i].velocity[0] += 0.5 * a1[0] * dt;
+    b[i].velocity[1] += 0.5 * a1[1] * dt;
+    b[i].velocity[2] += 0.5 * a1[2] * dt;
   }
 }
 
