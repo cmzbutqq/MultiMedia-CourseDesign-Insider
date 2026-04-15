@@ -35,12 +35,20 @@ uniform float adiskNoiseScale;
 uniform float adiskNoiseLOD;
 uniform float adiskSpeed;
 
-uniform float bodyKind;
-uniform float bodySize;
-uniform vec3 glowColor;
-uniform float glowIntensity;
-uniform float adiskGain;
-uniform float distortionScale;
+const int MAX_BODIES_I = 5;
+
+uniform float bodyCount;
+uniform vec3 bodyCenter[5];
+uniform float bodyLensStrength[5];
+uniform float bodyKind[5];
+uniform float bodySize[5];
+uniform vec3 glowColor[5];
+uniform float glowIntensity[5];
+uniform float adiskGain[5];
+
+uniform vec3 adiskOrigin;
+uniform float adiskDiskSize;
+uniform float adiskDiskGain;
 
 struct Ring {
   vec3 center;
@@ -220,10 +228,11 @@ mat3 lookAt(vec3 origin, vec3 target, float roll) {
   return mat3(uu, vv, ww);
 }
 
-void adiskColor(vec3 pos, inout vec3 color, inout float alpha) {
-  float innerRadius = 2.6 * bodySize;
-  float outerRadius = 12.0 * bodySize;
-  float hDisk = adiskHeight * bodySize;
+void adiskColor(vec3 posWorld, inout vec3 color, inout float alpha) {
+  vec3 pos = posWorld - adiskOrigin;
+  float innerRadius = 2.6 * adiskDiskSize;
+  float outerRadius = 12.0 * adiskDiskSize;
+  float hDisk = adiskHeight * adiskDiskSize;
 
   float density = max(
       0.0, 1.0 - length(pos.xyz / vec3(outerRadius, hDisk, outerRadius)));
@@ -247,7 +256,7 @@ void adiskColor(vec3 pos, inout vec3 color, inout float alpha) {
   density *= 16000.0;
 
   if (adiskParticle < 0.5) {
-    color += vec3(0.0, 1.0, 0.0) * density * 0.02 * adiskGain;
+    color += vec3(0.0, 1.0, 0.0) * density * 0.02 * adiskDiskGain;
     return;
   }
 
@@ -267,7 +276,24 @@ void adiskColor(vec3 pos, inout vec3 color, inout float alpha) {
   vec3 dustColor =
       texture(colorMap, vec2(sphericalCoord.x / outerRadius, 0.5)).rgb;
 
-  color += density * adiskLit * adiskGain * dustColor * alpha * abs(noise);
+  color += density * adiskLit * adiskDiskGain * dustColor * alpha * abs(noise);
+}
+
+vec3 shadeInnerBody(int j, vec3 color, vec3 rel, vec3 dir) {
+  float bk = bodyKind[j];
+  vec3 gc = glowColor[j];
+  float gi = glowIntensity[j];
+  if (bk < 0.5) {
+    return color;
+  } else if (bk < 1.5) {
+    return color * 0.12 + gc * gi;
+  } else {
+    vec3 n = normalize(rel);
+    vec3 vdir = normalize(-dir);
+    float mu = max(0.0, dot(n, vdir));
+    float limb = 0.22 + 0.78 * mu;
+    return color + gc * gi * limb;
+  }
 }
 
 vec3 traceColor(vec3 pos, vec3 dir) {
@@ -277,33 +303,45 @@ vec3 traceColor(vec3 pos, vec3 dir) {
   float STEP_SIZE = 0.1;
   dir *= STEP_SIZE;
 
-  vec3 h = cross(pos, dir);
-  float h2 = dot(h, h);
-
-  float R = max(bodySize, 0.01);
-  float R2 = R * R;
-  float lensSign = bodyKind > 0.5 && bodyKind < 1.5 ? -1.0 : 1.0;
+  float bc = bodyCount;
 
   for (int i = 0; i < 300; i++) {
     if (renderBlackHole > 0.5) {
       if (gravatationalLensing > 0.5) {
-        vec3 acc = accel(h2, pos) * distortionScale * lensSign;
+        vec3 acc = vec3(0.0);
+        for (int j = 0; j < MAX_BODIES_I; j++) {
+          if (float(j) >= bc - 0.5) {
+            break;
+          }
+          vec3 rel = pos - bodyCenter[j];
+          vec3 hj = cross(rel, dir);
+          float h2j = dot(hj, hj);
+          float lensSign = bodyKind[j] > 0.5 && bodyKind[j] < 1.5 ? -1.0 : 1.0;
+          acc += accel(h2j, rel) * bodyLensStrength[j] * lensSign;
+        }
         dir += acc;
       }
 
-      float r2 = dot(pos, pos);
-      if (r2 < R2) {
-        if (bodyKind < 0.5) {
-          return color;
-        } else if (bodyKind < 1.5) {
-          return color * 0.12 + glowColor * glowIntensity;
-        } else {
-          vec3 n = normalize(pos);
-          vec3 vdir = normalize(-dir);
-          float mu = max(0.0, dot(n, vdir));
-          float limb = 0.22 + 0.78 * mu;
-          return color + glowColor * glowIntensity * limb;
+      int hit = -1;
+      float bestD = 1.0e30;
+      for (int j = 0; j < MAX_BODIES_I; j++) {
+        if (float(j) >= bc - 0.5) {
+          break;
         }
+        vec3 rel = pos - bodyCenter[j];
+        float r2 = dot(rel, rel);
+        float R = max(bodySize[j], 0.01);
+        if (r2 < R * R) {
+          float d = length(rel);
+          if (d < bestD) {
+            bestD = d;
+            hit = j;
+          }
+        }
+      }
+      if (hit >= 0) {
+        vec3 rel = pos - bodyCenter[hit];
+        return shadeInnerBody(hit, color, rel, dir);
       }
 
       float minDistance = INF_TRACE;
@@ -317,7 +355,7 @@ vec3 traceColor(vec3 pos, vec3 dir) {
         ring.rotateSpeed = 0.08;
         ringColor(pos, dir, ring, minDistance, color);
       } else {
-        if (adiskEnabled > 0.5) {
+        if (adiskEnabled > 0.5 && bc > 0.5) {
           adiskColor(pos, color, alpha);
         }
       }
