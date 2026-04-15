@@ -5,3 +5,6 @@ localhost-key.pem
 localhost.pem
 .DS_Store
 *.log
+ssl/
+*.key
+*.crt
