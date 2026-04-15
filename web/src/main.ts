@@ -66,6 +66,61 @@ const params: Params = {
   gamma: 2.5,
 };
 
+type BodyKind = 'blackHole' | 'whiteHole' | 'neutronStar';
+
+interface BodyParams {
+  size: number;
+  glowColor: string;
+  glowIntensity: number;
+  adiskIntensity: number;
+  distortionStrength: number;
+}
+
+const bodyPresets: Record<BodyKind, BodyParams> = {
+  blackHole: {
+    size: 1,
+    glowColor: '#050508',
+    glowIntensity: 0,
+    adiskIntensity: 1,
+    distortionStrength: 1,
+  },
+  whiteHole: {
+    size: 1.15,
+    glowColor: '#eaf6ff',
+    glowIntensity: 3.5,
+    adiskIntensity: 1.2,
+    distortionStrength: 1,
+  },
+  neutronStar: {
+    size: 0.4,
+    glowColor: '#ffc9a0',
+    glowIntensity: 2.2,
+    adiskIntensity: 0.9,
+    distortionStrength: 0.5,
+  },
+};
+
+const uiBody = { activeBody: 'blackHole' as BodyKind };
+
+function bodyKindShaderValue(k: BodyKind): number {
+  if (k === 'blackHole') return 0;
+  if (k === 'whiteHole') return 1;
+  return 2;
+}
+
+function parseHexColorRgb(hex: string): [number, number, number] {
+  const h = hex.replace('#', '');
+  if (h.length !== 6) return [0, 0, 0];
+  const r = parseInt(h.slice(0, 2), 16) / 255;
+  const g = parseInt(h.slice(2, 4), 16) / 255;
+  const b = parseInt(h.slice(4, 6), 16) / 255;
+  return [r, g, b];
+}
+
+function setBodyFolderVisible(folder: { domElement: HTMLElement }, visible: boolean): void {
+  folder.domElement.style.display = visible ? '' : 'none';
+}
+
 interface PipelineRTs {
   main: ColorRT;
   brightness: ColorRT;
@@ -162,6 +217,19 @@ function setV2(
 ): void {
   const loc = ulCache(gl, program, cache, name);
   if (loc) gl.uniform2f(loc, x, y);
+}
+
+function setV3(
+  gl: WebGL2RenderingContext,
+  program: WebGLProgram,
+  cache: UniformMap,
+  name: string,
+  x: number,
+  y: number,
+  z: number,
+): void {
+  const loc = ulCache(gl, program, cache, name);
+  if (loc) gl.uniform3f(loc, x, y, z);
 }
 
 function setI1(
@@ -279,6 +347,40 @@ async function main(): Promise<void> {
   resizeNow();
 
   const gui = new GUI({ title: '参数' });
+
+  gui
+    .add(uiBody, 'activeBody', { 黑洞: 'blackHole', 白洞: 'whiteHole', 中子星: 'neutronStar' })
+    .name('天体类型')
+    .onChange(() => syncBodyFolders());
+
+  const folderBlackHole = gui.addFolder('黑洞参数');
+  folderBlackHole.add(bodyPresets.blackHole, 'size', 0.1, 4, 0.01).name('尺寸');
+  folderBlackHole.addColor(bodyPresets.blackHole, 'glowColor').name('发光颜色');
+  folderBlackHole.add(bodyPresets.blackHole, 'glowIntensity', 0, 2, 0.01).name('发光强度');
+  folderBlackHole.add(bodyPresets.blackHole, 'adiskIntensity', 0, 3, 0.01).name('吸积盘强度');
+  folderBlackHole.add(bodyPresets.blackHole, 'distortionStrength', 0, 3, 0.01).name('背景畸变');
+
+  const folderWhiteHole = gui.addFolder('白洞参数');
+  folderWhiteHole.add(bodyPresets.whiteHole, 'size', 0.1, 4, 0.01).name('尺寸');
+  folderWhiteHole.addColor(bodyPresets.whiteHole, 'glowColor').name('发光颜色');
+  folderWhiteHole.add(bodyPresets.whiteHole, 'glowIntensity', 0, 8, 0.05).name('发光强度');
+  folderWhiteHole.add(bodyPresets.whiteHole, 'adiskIntensity', 0, 3, 0.01).name('吸积盘强度');
+  folderWhiteHole.add(bodyPresets.whiteHole, 'distortionStrength', 0, 3, 0.01).name('背景畸变');
+
+  const folderNeutronStar = gui.addFolder('中子星参数');
+  folderNeutronStar.add(bodyPresets.neutronStar, 'size', 0.08, 2, 0.01).name('尺寸');
+  folderNeutronStar.addColor(bodyPresets.neutronStar, 'glowColor').name('发光颜色');
+  folderNeutronStar.add(bodyPresets.neutronStar, 'glowIntensity', 0, 6, 0.05).name('发光强度');
+  folderNeutronStar.add(bodyPresets.neutronStar, 'adiskIntensity', 0, 3, 0.01).name('吸积盘强度');
+  folderNeutronStar.add(bodyPresets.neutronStar, 'distortionStrength', 0, 3, 0.01).name('背景畸变');
+
+  function syncBodyFolders(): void {
+    setBodyFolderVisible(folderBlackHole, uiBody.activeBody === 'blackHole');
+    setBodyFolderVisible(folderWhiteHole, uiBody.activeBody === 'whiteHole');
+    setBodyFolderVisible(folderNeutronStar, uiBody.activeBody === 'neutronStar');
+  }
+  syncBodyFolders();
+
   gui.add(params, 'gravatationalLensing');
   gui.add(params, 'renderBlackHole');
   gui.add(params, 'mouseControl');
@@ -335,6 +437,15 @@ async function main(): Promise<void> {
       setF(gl, p.program, p.uniforms, 'adiskNoiseLOD', params.adiskNoiseLOD);
       setF(gl, p.program, p.uniforms, 'adiskNoiseScale', params.adiskNoiseScale);
       setF(gl, p.program, p.uniforms, 'adiskSpeed', params.adiskSpeed);
+
+      const bp = bodyPresets[uiBody.activeBody];
+      const [gr, gg, gb] = parseHexColorRgb(bp.glowColor);
+      setF(gl, p.program, p.uniforms, 'bodyKind', bodyKindShaderValue(uiBody.activeBody));
+      setF(gl, p.program, p.uniforms, 'bodySize', bp.size);
+      setV3(gl, p.program, p.uniforms, 'glowColor', gr, gg, gb);
+      setF(gl, p.program, p.uniforms, 'glowIntensity', bp.glowIntensity);
+      setF(gl, p.program, p.uniforms, 'adiskGain', bp.adiskIntensity);
+      setF(gl, p.program, p.uniforms, 'distortionScale', bp.distortionStrength);
     });
 
     drawPass(gl, vao, passes.bloomBright, brightness.fbo, rw, rh, time, () => {

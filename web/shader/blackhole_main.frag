@@ -35,6 +35,13 @@ uniform float adiskNoiseScale;
 uniform float adiskNoiseLOD;
 uniform float adiskSpeed;
 
+uniform float bodyKind;
+uniform float bodySize;
+uniform vec3 glowColor;
+uniform float glowIntensity;
+uniform float adiskGain;
+uniform float distortionScale;
+
 struct Ring {
   vec3 center;
   vec3 normal;
@@ -214,16 +221,17 @@ mat3 lookAt(vec3 origin, vec3 target, float roll) {
 }
 
 void adiskColor(vec3 pos, inout vec3 color, inout float alpha) {
-  float innerRadius = 2.6;
-  float outerRadius = 12.0;
+  float innerRadius = 2.6 * bodySize;
+  float outerRadius = 12.0 * bodySize;
+  float hDisk = adiskHeight * bodySize;
 
   float density = max(
-      0.0, 1.0 - length(pos.xyz / vec3(outerRadius, adiskHeight, outerRadius)));
+      0.0, 1.0 - length(pos.xyz / vec3(outerRadius, hDisk, outerRadius)));
   if (density < 0.001) {
     return;
   }
 
-  density *= pow(1.0 - abs(pos.y) / adiskHeight, adiskDensityV);
+  density *= pow(1.0 - abs(pos.y) / hDisk, adiskDensityV);
   density *= smoothstep(innerRadius, innerRadius * 1.1, length(pos));
 
   if (density < 0.001) {
@@ -239,7 +247,7 @@ void adiskColor(vec3 pos, inout vec3 color, inout float alpha) {
   density *= 16000.0;
 
   if (adiskParticle < 0.5) {
-    color += vec3(0.0, 1.0, 0.0) * density * 0.02;
+    color += vec3(0.0, 1.0, 0.0) * density * 0.02 * adiskGain;
     return;
   }
 
@@ -259,7 +267,7 @@ void adiskColor(vec3 pos, inout vec3 color, inout float alpha) {
   vec3 dustColor =
       texture(colorMap, vec2(sphericalCoord.x / outerRadius, 0.5)).rgb;
 
-  color += density * adiskLit * dustColor * alpha * abs(noise);
+  color += density * adiskLit * adiskGain * dustColor * alpha * abs(noise);
 }
 
 vec3 traceColor(vec3 pos, vec3 dir) {
@@ -272,15 +280,30 @@ vec3 traceColor(vec3 pos, vec3 dir) {
   vec3 h = cross(pos, dir);
   float h2 = dot(h, h);
 
+  float R = max(bodySize, 0.01);
+  float R2 = R * R;
+  float lensSign = bodyKind > 0.5 && bodyKind < 1.5 ? -1.0 : 1.0;
+
   for (int i = 0; i < 300; i++) {
     if (renderBlackHole > 0.5) {
       if (gravatationalLensing > 0.5) {
-        vec3 acc = accel(h2, pos);
+        vec3 acc = accel(h2, pos) * distortionScale * lensSign;
         dir += acc;
       }
 
-      if (dot(pos, pos) < 1.0) {
-        return color;
+      float r2 = dot(pos, pos);
+      if (r2 < R2) {
+        if (bodyKind < 0.5) {
+          return color;
+        } else if (bodyKind < 1.5) {
+          return color * 0.12 + glowColor * glowIntensity;
+        } else {
+          vec3 n = normalize(pos);
+          vec3 vdir = normalize(-dir);
+          float mu = max(0.0, dot(n, vdir));
+          float limb = 0.22 + 0.78 * mu;
+          return color + glowColor * glowIntensity * limb;
+        }
       }
 
       float minDistance = INF_TRACE;
