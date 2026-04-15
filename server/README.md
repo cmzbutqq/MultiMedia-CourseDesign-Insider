@@ -55,11 +55,10 @@
 ```bash
 cd server
 
-# 启动 GPU 版本
+# 启动服务 (CPU 模式，默认)
 docker-compose up -d gesture-server
 
-# 或启动 CPU 版本 (如果没有 GPU)
-docker-compose --profile cpu-only up -d gesture-server-cpu
+# GPU 版本需要取消 docker-compose.yml 中 gesture-server-gpu 的注释
 ```
 
 ### 方法 2: 本地运行
@@ -111,16 +110,20 @@ curl -X POST http://localhost:5000/api/detect \
     ...
   ],
   "gesture": {
-    "is_pinching": true,
-    "pinch_strength": 0.8,
-    "is_dragging": false,
-    "gesture_type": "pinch",
-    "hand_detected": true
-  }
+    "hand_detected": true,
+    "hand_confidence": 0.8,
+    "palm_x": 0.5,
+    "palm_y": 0.5,
+    "is_open_palm": false,
+    "finger_count": 0
+  },
+  "num_landmarks": 21
 }
 ```
 
 ### 3. WebSocket 实时通信
+
+WebSocket 用于实时通信场景（客户端需要持续接收检测结果）：
 
 ```javascript
 const socket = io('http://localhost:5000');
@@ -129,10 +132,13 @@ socket.on('connect', () => {
   console.log('已连接到服务器');
 });
 
+socket.on('connected', (data) => {
+  console.log('服务器消息:', data.message);
+});
+
 socket.on('hand_results', (data) => {
   console.log('手势结果:', data);
-  
-  // 处理关键点
+
   if (data.hand_detected) {
     const landmarks = data.landmarks;
     const gesture = data.gesture;
@@ -146,7 +152,7 @@ socket.on('frame_error', (error) => {
 
 // 发送视频帧
 socket.emit('video_frame', {
-  image: base64ImageData,
+  image: base64ImageData,  // 不带 data:image/jpeg;base64, 前缀
   timestamp: Date.now()
 });
 ```
@@ -155,38 +161,21 @@ socket.emit('video_frame', {
 
 ### NVIDIA GPU 设置
 
-#### Docker 环境 (推荐)
+#### Docker 环境
 
-`docker-compose.yml` 已配置 NVIDIA GPU 支持:
+GPU 版本配置已在 `docker-compose.yml` 中提供，但默认禁用。如需启用：
 
-```yaml
-deploy:
-  resources:
-    reservations:
-      devices:
-        - driver: nvidia
-          count: 1
-          capabilities: [gpu]
-```
-
-确保安装:
-- [NVIDIA Docker 运行时](https://github.com/NVIDIA/nvidia-docker)
-- NVIDIA 驱动
+1. 取消 `gesture-server-gpu` 服务的注释
+2. 确保安装 [NVIDIA Docker 运行时](https://github.com/NVIDIA/nvidia-docker) 和 NVIDIA 驱动
+3. 运行 `docker-compose up -d gesture-server-gpu`
 
 #### 本地环境
 
-安装 CUDA 和 cuDNN:
-
-```bash
-# 检查 GPU 可用性
-python3 -c "import torch; print(torch.cuda.is_available())"
-```
-
-MediaPipe 将自动使用 GPU:
+MediaPipe 默认尝试使用 GPU，失败时自动回退到 CPU：
 
 ```python
 base_options = python.BaseOptions(
-    delegate=python.BaseOptions.Delegate.GPU  # 使用 GPU
+    delegate=python.BaseOptions.Delegate.GPU  # 使用 GPU，回退到 CPU
 )
 ```
 
@@ -223,26 +212,26 @@ base_options = python.BaseOptions(
 
 ## 集成到前端
 
-### 使用服务端客户端
+前端通过 `ServerGestureClient` 类连接服务器，使用 REST API `/api/detect` 发送帧并接收结果。详见 `web/src/serverGestureClient.ts`。
+
+主要接口：
 
 ```typescript
-import { ServerHandGestureController } from './serverHandGesture';
+import { ServerGestureClient } from './serverGestureClient';
 
-const controller = new ServerHandGestureController('http://localhost:5000');
+const client = new ServerGestureClient({ host: 'localhost', port: 5000 });
 
-await controller.initialize(videoElement, canvasElement);
+await client.initialize(videoElement, canvasElement);
 
-controller.onGesture((results) => {
-  if (results.hand_detected) {
-    // 应用手势控制
-    const { gesture } = results;
-    if (gesture.is_dragging) {
-      // 拖动控制
-    }
+client.onGesture((event) => {
+  if (event.gestureState.handDetected) {
+    const { palmX, palmY, isOpenPalm, fingerCount } = event.gestureState;
+    // 应用到手势控制
   }
 });
 
-controller.setEnabled(true);
+client.enable();  // 开始处理帧
+client.disable(); // 停止处理
 ```
 
 ## 故障排除
@@ -252,10 +241,9 @@ controller.setEnabled(true);
 检查:
 ```bash
 nvidia-smi
-python3 -c "import torch; print(torch.cuda.is_available())"
 ```
 
-解决方案: 使用 CPU 版本或安装 NVIDIA 驱动
+解决方案: 服务器会自动回退到 CPU 模式，无需手动切换
 
 ### 问题 2: MediaPipe 模型下载失败
 
@@ -317,3 +305,4 @@ tail -f server.log
 - [ ] 添加手势识别历史
 - [ ] 优化网络传输
 - [ ] 添加缓存机制
+- [ ] 支持多手检测
