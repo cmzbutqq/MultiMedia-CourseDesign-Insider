@@ -35,6 +35,21 @@ uniform float adiskNoiseScale;
 uniform float adiskNoiseLOD;
 uniform float adiskSpeed;
 
+const int MAX_BODIES_I = 5;
+
+uniform float bodyCount;
+uniform vec3 bodyCenter[5];
+uniform float bodyLensStrength[5];
+uniform float bodyKind[5];
+uniform float bodySize[5];
+uniform vec3 glowColor[5];
+uniform float glowIntensity[5];
+uniform float adiskGain[5];
+
+uniform vec3 adiskOrigin;
+uniform float adiskDiskSize;
+uniform float adiskDiskGain;
+
 struct Ring {
   vec3 center;
   vec3 normal;
@@ -213,17 +228,19 @@ mat3 lookAt(vec3 origin, vec3 target, float roll) {
   return mat3(uu, vv, ww);
 }
 
-void adiskColor(vec3 pos, inout vec3 color, inout float alpha) {
-  float innerRadius = 2.6;
-  float outerRadius = 12.0;
+void adiskColor(vec3 posWorld, inout vec3 color, inout float alpha) {
+  vec3 pos = posWorld - adiskOrigin;
+  float innerRadius = 2.6 * adiskDiskSize;
+  float outerRadius = 12.0 * adiskDiskSize;
+  float hDisk = adiskHeight * adiskDiskSize;
 
   float density = max(
-      0.0, 1.0 - length(pos.xyz / vec3(outerRadius, adiskHeight, outerRadius)));
+      0.0, 1.0 - length(pos.xyz / vec3(outerRadius, hDisk, outerRadius)));
   if (density < 0.001) {
     return;
   }
 
-  density *= pow(1.0 - abs(pos.y) / adiskHeight, adiskDensityV);
+  density *= pow(1.0 - abs(pos.y) / hDisk, adiskDensityV);
   density *= smoothstep(innerRadius, innerRadius * 1.1, length(pos));
 
   if (density < 0.001) {
@@ -239,7 +256,7 @@ void adiskColor(vec3 pos, inout vec3 color, inout float alpha) {
   density *= 16000.0;
 
   if (adiskParticle < 0.5) {
-    color += vec3(0.0, 1.0, 0.0) * density * 0.02;
+    color += vec3(0.0, 1.0, 0.0) * density * 0.02 * adiskDiskGain;
     return;
   }
 
@@ -259,7 +276,24 @@ void adiskColor(vec3 pos, inout vec3 color, inout float alpha) {
   vec3 dustColor =
       texture(colorMap, vec2(sphericalCoord.x / outerRadius, 0.5)).rgb;
 
-  color += density * adiskLit * dustColor * alpha * abs(noise);
+  color += density * adiskLit * adiskDiskGain * dustColor * alpha * abs(noise);
+}
+
+vec3 shadeInnerBody(int j, vec3 color, vec3 rel, vec3 dir) {
+  float bk = bodyKind[j];
+  vec3 gc = glowColor[j];
+  float gi = glowIntensity[j];
+  if (bk < 0.5) {
+    return color;
+  } else if (bk < 1.5) {
+    return color * 0.12 + gc * gi;
+  } else {
+    vec3 n = normalize(rel);
+    vec3 vdir = normalize(-dir);
+    float mu = max(0.0, dot(n, vdir));
+    float limb = 0.22 + 0.78 * mu;
+    return color + gc * gi * limb;
+  }
 }
 
 vec3 traceColor(vec3 pos, vec3 dir) {
@@ -269,18 +303,45 @@ vec3 traceColor(vec3 pos, vec3 dir) {
   float STEP_SIZE = 0.1;
   dir *= STEP_SIZE;
 
-  vec3 h = cross(pos, dir);
-  float h2 = dot(h, h);
+  float bc = bodyCount;
 
   for (int i = 0; i < 300; i++) {
     if (renderBlackHole > 0.5) {
       if (gravatationalLensing > 0.5) {
-        vec3 acc = accel(h2, pos);
+        vec3 acc = vec3(0.0);
+        for (int j = 0; j < MAX_BODIES_I; j++) {
+          if (float(j) >= bc - 0.5) {
+            break;
+          }
+          vec3 rel = pos - bodyCenter[j];
+          vec3 hj = cross(rel, dir);
+          float h2j = dot(hj, hj);
+          float lensSign = bodyKind[j] > 0.5 && bodyKind[j] < 1.5 ? -1.0 : 1.0;
+          acc += accel(h2j, rel) * bodyLensStrength[j] * lensSign;
+        }
         dir += acc;
       }
 
-      if (dot(pos, pos) < 1.0) {
-        return color;
+      int hit = -1;
+      float bestD = 1.0e30;
+      for (int j = 0; j < MAX_BODIES_I; j++) {
+        if (float(j) >= bc - 0.5) {
+          break;
+        }
+        vec3 rel = pos - bodyCenter[j];
+        float r2 = dot(rel, rel);
+        float R = max(bodySize[j], 0.01);
+        if (r2 < R * R) {
+          float d = length(rel);
+          if (d < bestD) {
+            bestD = d;
+            hit = j;
+          }
+        }
+      }
+      if (hit >= 0) {
+        vec3 rel = pos - bodyCenter[hit];
+        return shadeInnerBody(hit, color, rel, dir);
       }
 
       float minDistance = INF_TRACE;
@@ -294,7 +355,7 @@ vec3 traceColor(vec3 pos, vec3 dir) {
         ring.rotateSpeed = 0.08;
         ringColor(pos, dir, ring, minDistance, color);
       } else {
-        if (adiskEnabled > 0.5) {
+        if (adiskEnabled > 0.5 && bc > 0.5) {
           adiskColor(pos, color, alpha);
         }
       }

@@ -9,6 +9,23 @@ import {
   detectRTFormat,
 } from './gl.js';
 import { loadCubemap, loadTexture2D } from './resources.js';
+import {
+  MAX_BODIES,
+  type BodyKind,
+  type SceneState,
+  applySceneState,
+  cloneSceneState,
+} from './scene.js';
+import { stepScene } from './physics.js';
+import { createDefaultScene, SCENE_PRESETS } from './scenePresets.js';
+import { getCameraLookBasis, worldToScreenPx } from './camera.js';
+import { TrailBuffer, TRAIL_COLORS } from './trails.js';
+import {
+  bodyMassRef,
+  positionRef,
+  velocityRef,
+  visualRef,
+} from './bodyBindings.js';
 
 import simpleVert from '../shader/simple.vert?raw';
 import blackholeMainFrag from '../shader/blackhole_main.frag?raw';
@@ -21,6 +38,7 @@ import passthroughFrag from '../shader/passthrough.frag?raw';
 
 const MAX_BLOOM_ITER = 8;
 const MAX_DPR = 2;
+const LENS_MASS_REF = 10;
 
 interface Params {
   gravatationalLensing: boolean;
@@ -65,6 +83,21 @@ const params: Params = {
   tonemappingEnabled: true,
   gamma: 2.5,
 };
+
+function bodyKindShaderValue(k: BodyKind): number {
+  if (k === 'blackHole') return 0;
+  if (k === 'whiteHole') return 1;
+  return 2;
+}
+
+function parseHexColorRgb(hex: string): [number, number, number] {
+  const h = hex.replace('#', '');
+  if (h.length !== 6) return [0, 0, 0];
+  const r = parseInt(h.slice(0, 2), 16) / 255;
+  const g = parseInt(h.slice(2, 4), 16) / 255;
+  const b = parseInt(h.slice(4, 6), 16) / 255;
+  return [r, g, b];
+}
 
 interface PipelineRTs {
   main: ColorRT;
@@ -164,6 +197,19 @@ function setV2(
   if (loc) gl.uniform2f(loc, x, y);
 }
 
+function setV3(
+  gl: WebGL2RenderingContext,
+  program: WebGLProgram,
+  cache: UniformMap,
+  name: string,
+  x: number,
+  y: number,
+  z: number,
+): void {
+  const loc = ulCache(gl, program, cache, name);
+  if (loc) gl.uniform3f(loc, x, y, z);
+}
+
 function setI1(
   gl: WebGL2RenderingContext,
   program: WebGLProgram,
@@ -211,8 +257,80 @@ function drawPass(
   gl.useProgram(null);
 }
 
+function bindSceneUniforms(
+  gl: WebGL2RenderingContext,
+  p: Pass,
+  scene: SceneState,
+): void {
+  setF(gl, p.program, p.uniforms, 'bodyCount', scene.bodyCount);
+  for (let i = 0; i < MAX_BODIES; i++) {
+    const b = scene.bodies[i]!;
+    const active = i < scene.bodyCount;
+    const nameC = `bodyCenter[${i}]`;
+    const nameL = `bodyLensStrength[${i}]`;
+    const nameK = `bodyKind[${i}]`;
+    const nameS = `bodySize[${i}]`;
+    const nameG = `glowColor[${i}]`;
+    const nameGi = `glowIntensity[${i}]`;
+    const nameA = `adiskGain[${i}]`;
+    if (active) {
+      setV3(gl, p.program, p.uniforms, nameC, b.position[0], b.position[1], b.position[2]);
+      const lens = b.visual.distortionStrength * (b.mass / LENS_MASS_REF);
+      setF(gl, p.program, p.uniforms, nameL, lens);
+      setF(gl, p.program, p.uniforms, nameK, bodyKindShaderValue(b.kind));
+      setF(gl, p.program, p.uniforms, nameS, b.visual.size);
+      const [cr, cg, cb] = parseHexColorRgb(b.visual.glowColor);
+      setV3(gl, p.program, p.uniforms, nameG, cr, cg, cb);
+      setF(gl, p.program, p.uniforms, nameGi, b.visual.glowIntensity);
+      setF(gl, p.program, p.uniforms, nameA, b.visual.adiskIntensity);
+    } else {
+      setV3(gl, p.program, p.uniforms, nameC, 0, 0, 0);
+      setF(gl, p.program, p.uniforms, nameL, 0);
+      setF(gl, p.program, p.uniforms, nameK, 0);
+      setF(gl, p.program, p.uniforms, nameS, 0.001);
+      setV3(gl, p.program, p.uniforms, nameG, 0, 0, 0);
+      setF(gl, p.program, p.uniforms, nameGi, 0);
+      setF(gl, p.program, p.uniforms, nameA, 0);
+    }
+  }
+  if (scene.bodyCount >= 1) {
+    const b0 = scene.bodies[0]!;
+    setV3(gl, p.program, p.uniforms, 'adiskOrigin', b0.position[0], b0.position[1], b0.position[2]);
+    setF(gl, p.program, p.uniforms, 'adiskDiskSize', b0.visual.size);
+    setF(gl, p.program, p.uniforms, 'adiskDiskGain', b0.visual.adiskIntensity);
+  } else {
+    setV3(gl, p.program, p.uniforms, 'adiskOrigin', 0, 0, 0);
+    setF(gl, p.program, p.uniforms, 'adiskDiskSize', 1);
+    setF(gl, p.program, p.uniforms, 'adiskDiskGain', 0);
+  }
+}
+
+function syncUiSceneFromScene(
+  uiScene: {
+    dynamics: SceneState['dynamics'];
+    bodyCount: number;
+    gmCentral: number;
+    nbodyG: number;
+    softening: number;
+    dt: number;
+    showTrails: boolean;
+  },
+  scene: SceneState,
+): void {
+  uiScene.bodyCount = scene.bodyCount;
+  uiScene.dynamics = scene.dynamics;
+  uiScene.gmCentral = scene.gmCentral;
+  uiScene.nbodyG = scene.nbodyG;
+  uiScene.softening = scene.softening;
+  uiScene.dt = scene.dt;
+  uiScene.showTrails = scene.showTrails;
+}
+
 async function main(): Promise<void> {
   const canvas = document.getElementById('c') as HTMLCanvasElement;
+  const trailCanvas = document.getElementById('trail') as HTMLCanvasElement | null;
+  const trailCtx = trailCanvas?.getContext('2d');
+
   const glCtx = canvas.getContext('webgl2', {
     antialias: false,
     depth: false,
@@ -224,6 +342,10 @@ async function main(): Promise<void> {
     throw new Error('需要支持 WebGL2 的浏览器');
   }
   const gl: WebGL2RenderingContext = glCtx;
+
+  const scene: SceneState = createDefaultScene();
+  let initialSnapshot = cloneSceneState(scene);
+  const trails = new TrailBuffer();
 
   const [galaxy, colorMap, vao, passes] = await Promise.all([
     loadCubemap(gl, '/assets/skybox_nebula_dark'),
@@ -256,17 +378,34 @@ async function main(): Promise<void> {
   let pipeline: PipelineRTs | null = null;
   let rtFormat: ColorRTFormat = 'rgba8';
 
+  function resizeTrailCanvas(): void {
+    if (!trailCanvas || !trailCtx) return;
+    const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
+    const w = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+    const h = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+    if (trailCanvas.width !== w || trailCanvas.height !== h) {
+      trailCanvas.width = w;
+      trailCanvas.height = h;
+    }
+    trailCanvas.style.width = `${canvas.clientWidth}px`;
+    trailCanvas.style.height = `${canvas.clientHeight}px`;
+  }
+
   function resizeNow(): void {
     const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
     const w = Math.max(1, Math.floor(canvas.clientWidth * dpr));
     const h = Math.max(1, Math.floor(canvas.clientHeight * dpr));
-    if (canvas.width === w && canvas.height === h && pipeline) return;
+    if (canvas.width === w && canvas.height === h && pipeline) {
+      resizeTrailCanvas();
+      return;
+    }
     canvas.width = w;
     canvas.height = h;
     destroyPipeline(gl, pipeline);
     const r = tryAllocPipeline(gl, w, h);
     pipeline = r.pipeline;
     rtFormat = r.format;
+    resizeTrailCanvas();
     if (rtFormat === 'rgba8') {
       console.warn(
         '[blackhole-web] 使用 RGBA8 离屏目标（无 EXT_color_buffer_float 或 RGBA16F 不完整）。高亮/Bloom 可能被裁切。',
@@ -279,6 +418,124 @@ async function main(): Promise<void> {
   resizeNow();
 
   const gui = new GUI({ title: '参数' });
+
+  const bodyFolders: GUI[] = [];
+  function syncBodyFolders(): void {
+    for (let i = 0; i < MAX_BODIES; i++) {
+      const f = bodyFolders[i];
+      if (f) f.domElement.style.display = i < scene.bodyCount ? '' : 'none';
+    }
+  }
+
+  const uiScene = {
+    dynamics: scene.dynamics,
+    bodyCount: scene.bodyCount,
+    gmCentral: scene.gmCentral,
+    nbodyG: scene.nbodyG,
+    softening: scene.softening,
+    dt: scene.dt,
+    showTrails: scene.showTrails,
+    presetName: '单天体' as keyof typeof SCENE_PRESETS,
+  };
+
+  const sceneFolder = gui.addFolder('场景');
+  sceneFolder
+    .add(uiScene, 'dynamics', { 静态: 'static', 开普勒: 'kepler', N体: 'nbody' })
+    .name('动力学')
+    .onChange((v: SceneState['dynamics']) => {
+      scene.dynamics = v;
+    });
+  sceneFolder
+    .add(uiScene, 'bodyCount', 1, MAX_BODIES, 1)
+    .name('天体数量')
+    .onChange((v: number) => {
+      scene.bodyCount = Math.round(v);
+      uiScene.bodyCount = scene.bodyCount;
+      syncBodyFolders();
+    });
+  sceneFolder
+    .add(uiScene, 'gmCentral', 1, 500)
+    .name('中心GM(开普勒)')
+    .onChange((v: number) => {
+      scene.gmCentral = v;
+    });
+  sceneFolder
+    .add(uiScene, 'nbodyG', 0.1, 20)
+    .name('G(N体)')
+    .onChange((v: number) => {
+      scene.nbodyG = v;
+    });
+  sceneFolder
+    .add(uiScene, 'softening', 0.01, 2)
+    .name('软化')
+    .onChange((v: number) => {
+      scene.softening = v;
+    });
+  sceneFolder
+    .add(uiScene, 'dt', 0.001, 0.1, 0.001)
+    .name('步长')
+    .onChange((v: number) => {
+      scene.dt = v;
+    });
+  sceneFolder
+    .add(uiScene, 'showTrails')
+    .name('轨迹')
+    .onChange((v: boolean) => {
+      scene.showTrails = v;
+    });
+
+  function loadPreset(name: keyof typeof SCENE_PRESETS): void {
+    const snap = SCENE_PRESETS[name];
+    if (!snap) return;
+    applySceneState(scene, cloneSceneState(snap));
+    initialSnapshot = cloneSceneState(scene);
+    syncUiSceneFromScene(uiScene, scene);
+    gui.controllersRecursive().forEach((c) => c.updateDisplay());
+    syncBodyFolders();
+    trails.reset();
+  }
+
+  sceneFolder
+    .add(uiScene, 'presetName', Object.keys(SCENE_PRESETS) as (keyof typeof SCENE_PRESETS)[])
+    .name('预设')
+    .onChange((name: keyof typeof SCENE_PRESETS) => {
+      loadPreset(name);
+    });
+  sceneFolder.add(
+    {
+      reset() {
+        applySceneState(scene, cloneSceneState(initialSnapshot));
+        syncUiSceneFromScene(uiScene, scene);
+        gui.controllersRecursive().forEach((c) => c.updateDisplay());
+        syncBodyFolders();
+        trails.reset();
+      },
+    },
+    'reset',
+  ).name('重置');
+
+  const kindOptions = { 黑洞: 'blackHole', 白洞: 'whiteHole', 中子星: 'neutronStar' } as const;
+
+  for (let bi = 0; bi < MAX_BODIES; bi++) {
+    const bf = gui.addFolder(`天体 ${bi}`);
+    bodyFolders.push(bf);
+    bf.add(positionRef(scene, bi), 'x', -40, 40, 0.05).name('px');
+    bf.add(positionRef(scene, bi), 'y', -40, 40, 0.05).name('py');
+    bf.add(positionRef(scene, bi), 'z', -40, 40, 0.05).name('pz');
+    bf.add(velocityRef(scene, bi), 'x', -20, 20, 0.02).name('vx');
+    bf.add(velocityRef(scene, bi), 'y', -20, 20, 0.02).name('vy');
+    bf.add(velocityRef(scene, bi), 'z', -20, 20, 0.02).name('vz');
+    bf.add(bodyMassRef(scene, bi), 'mass', 0.01, 80, 0.01).name('质量');
+    bf.add(scene.bodies[bi]!, 'kind', kindOptions).name('类型');
+    bf.addColor(scene.bodies[bi]!.visual, 'glowColor').name('发光色');
+    bf.add(visualRef(scene, bi), 'size', 0.05, 4, 0.01).name('尺寸');
+    bf.add(visualRef(scene, bi), 'glowIntensity', 0, 8, 0.05).name('发光强度');
+    bf.add(visualRef(scene, bi), 'adiskIntensity', 0, 3, 0.01).name('吸积盘');
+    bf.add(visualRef(scene, bi), 'distortionStrength', 0, 3, 0.01).name('畸变');
+  }
+
+  syncBodyFolders();
+
   gui.add(params, 'gravatationalLensing');
   gui.add(params, 'renderBlackHole');
   gui.add(params, 'mouseControl');
@@ -299,10 +556,66 @@ async function main(): Promise<void> {
   gui.add(params, 'tonemappingEnabled');
   gui.add(params, 'gamma', 1, 4);
 
+  function drawTrails(time: number): void {
+    if (!trailCanvas || !trailCtx) return;
+    const w = trailCanvas.width;
+    const h = trailCanvas.height;
+    trailCtx.clearRect(0, 0, w, h);
+    if (!scene.showTrails) return;
+
+    const cam = getCameraLookBasis(
+      time,
+      mouseX,
+      mouseY,
+      w,
+      h,
+      params.mouseControl,
+      params.frontView,
+      params.topView,
+      params.cameraRoll,
+    );
+
+    for (let bi = 0; bi < scene.bodyCount; bi++) {
+      const b = scene.bodies[bi]!;
+      trailCtx.strokeStyle = TRAIL_COLORS[bi] ?? 'rgba(255,255,255,0.6)';
+      trailCtx.lineWidth = 1.5;
+      trailCtx.beginPath();
+      let first = true;
+      trails.iterateOrdered(bi, (x, y, z) => {
+        const p = worldToScreenPx([x, y, z], cam, 1, w, h);
+        if (!p) return;
+        if (first) {
+          trailCtx.moveTo(p.x, p.y);
+          first = false;
+        } else {
+          trailCtx.lineTo(p.x, p.y);
+        }
+      });
+      trailCtx.stroke();
+
+      const cur = worldToScreenPx(b.position, cam, 1, w, h);
+      if (cur) {
+        trailCtx.fillStyle = TRAIL_COLORS[bi] ?? '#fff';
+        trailCtx.beginPath();
+        trailCtx.arc(cur.x, cur.y, 3, 0, Math.PI * 2);
+        trailCtx.fill();
+      }
+    }
+  }
+
   function frame(now: number): void {
     requestAnimationFrame(frame);
     const time = now / 1000;
     if (!pipeline) return;
+
+    stepScene(scene);
+
+    if (scene.showTrails) {
+      for (let bi = 0; bi < scene.bodyCount; bi++) {
+        const b = scene.bodies[bi]!;
+        trails.push(bi, b.position[0], b.position[1], b.position[2]);
+      }
+    }
 
     const { width: rw, height: rh, main, brightness, down, up, bloomFinal, tonemapped } =
       pipeline;
@@ -335,6 +648,8 @@ async function main(): Promise<void> {
       setF(gl, p.program, p.uniforms, 'adiskNoiseLOD', params.adiskNoiseLOD);
       setF(gl, p.program, p.uniforms, 'adiskNoiseScale', params.adiskNoiseScale);
       setF(gl, p.program, p.uniforms, 'adiskSpeed', params.adiskSpeed);
+
+      bindSceneUniforms(gl, p, scene);
     });
 
     drawPass(gl, vao, passes.bloomBright, brightness.fbo, rw, rh, time, () => {
@@ -401,6 +716,8 @@ async function main(): Promise<void> {
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, tonemapped.texture);
     });
+
+    drawTrails(time);
   }
 
   requestAnimationFrame(frame);
