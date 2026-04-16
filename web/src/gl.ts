@@ -121,15 +121,48 @@ export function createMSAART(
   height: number,
   _format: ColorRTFormat,
   samples: number,
-): MSAART {
+): MSAART | null {
   const texture = gl.createTexture()!;
-  gl.bindTexture(gl.TEXTURE_2D_MULTISAMPLE, texture);
-  const maxAttachments = gl.getParameter(gl.MAX_COLOR_ATTACHMENTS);
-  const actualSamples = Math.min(samples, maxAttachments);
-  gl.texImage2DMultisample(gl.TEXTURE_2D_MULTISAMPLE, actualSamples, gl.RGBA8, width, height, true);
-
   const fbo = gl.createFramebuffer()!;
+
+  // Query MAX_SAMPLES first, before any bind calls
+  const maxSamples = gl.getParameter(gl.MAX_SAMPLES);
+  // Guard: if MAX_SAMPLES is 0 or null, MSAA is not supported - return null for graceful fallback
+  if (!maxSamples) {
+    gl.deleteFramebuffer(fbo);
+    gl.deleteTexture(texture);
+    console.warn('[gl] MSAA not supported (MAX_SAMPLES=' + maxSamples + '), returning null');
+    return null;
+  }
+  const actualSamples = Math.max(1, Math.min(samples, maxSamples));
+  // If actualSamples <= 1, MSAA is pointless - return null for cleaner pipeline
+  if (actualSamples <= 1) {
+    gl.deleteFramebuffer(fbo);
+    gl.deleteTexture(texture);
+    console.warn('[gl] MSAA with ' + actualSamples + ' sample(s) is pointless, returning null');
+    return null;
+  }
+  if (actualSamples < samples) {
+    console.warn(`[gl] MSAA requested ${samples}x but limited to ${actualSamples}x (MAX_SAMPLES=${maxSamples})`);
+  }
+
+  // Now bind and allocate
+  gl.bindTexture(gl.TEXTURE_2D_MULTISAMPLE, texture);
   gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+
+  // texImage2DMultisample is guaranteed in WebGL2 spec, but some software renderers lack it
+  const texFn = (gl as unknown as { texImage2DMultisample: Function }).texImage2DMultisample;
+  if (typeof texFn !== 'function') {
+    // Clean up bindings before returning null
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.bindTexture(gl.TEXTURE_2D_MULTISAMPLE, null);
+    gl.deleteFramebuffer(fbo);
+    gl.deleteTexture(texture);
+    console.warn('[gl] texImage2DMultisample not available, returning null');
+    return null;
+  }
+  texFn.call(gl, gl.TEXTURE_2D_MULTISAMPLE, actualSamples, gl.RGBA8, width, height, true);
+
   gl.framebufferTexture2D(
     gl.DRAW_FRAMEBUFFER,
     gl.COLOR_ATTACHMENT0,
@@ -137,8 +170,16 @@ export function createMSAART(
     texture,
     0,
   );
+  const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   gl.bindTexture(gl.TEXTURE_2D_MULTISAMPLE, null);
+
+  if (status !== gl.FRAMEBUFFER_COMPLETE) {
+    gl.deleteFramebuffer(fbo);
+    gl.deleteTexture(texture);
+    console.warn('[gl] MSAA FBO incomplete (status=' + status + '), returning null');
+    return null;
+  }
 
   return { texture, fbo };
 }

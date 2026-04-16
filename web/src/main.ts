@@ -168,8 +168,17 @@ function allocPipeline(
   msaaSamples: number,
 ): PipelineRTs {
   const main = createColorRT(gl, width, height, format);
-  const mainMsaa = aaMode === 'taa' ? createMSAART(gl, width, height, format, msaaSamples) : null;
-  const mainResolved = mainMsaa ? createColorRT(gl, width, height, format) : null;
+  // createMSAART returns null if MSAA is not supported on this device
+  let mainMsaa = aaMode === 'taa' ? createMSAART(gl, width, height, format, msaaSamples) : null;
+  let mainResolved = mainMsaa ? createColorRT(gl, width, height, format) : null;
+  // If MSAA is not supported but we requested TAA, try with 1 sample or fall back to no MSAA
+  if (aaMode === 'taa' && !mainMsaa && msaaSamples > 1) {
+    console.warn('[blackhole-web] TAA with MSAA unavailable, trying with reduced samples');
+    mainMsaa = createMSAART(gl, width, height, format, 1);
+    if (mainMsaa) {
+      mainResolved = createColorRT(gl, width, height, format);
+    }
+  }
   const brightness = createColorRT(gl, width, height, format);
   const bloomFinal = createColorRT(gl, width, height, format);
   const tonemapped = createColorRT(gl, width, height, format);
@@ -200,9 +209,39 @@ function tryAllocPipeline(
   const preferred = detectRTFormat(gl);
   try {
     return { pipeline: allocPipeline(gl, width, height, preferred, aaMode, msaaSamples), format: preferred };
-  } catch {
+  } catch (e) {
+    console.warn('[blackhole-web] Pipeline allocation failed, retrying with fallback:', e);
+    // Fallback 1: try with rgba8 format
     if (preferred === 'float16') {
-      return { pipeline: allocPipeline(gl, width, height, 'rgba8', aaMode, msaaSamples), format: 'rgba8' };
+      try {
+        return { pipeline: allocPipeline(gl, width, height, 'rgba8', aaMode, msaaSamples), format: 'rgba8' };
+      } catch (e2) {
+        console.warn('[blackhole-web] Pipeline allocation with rgba8 also failed:', e2);
+      }
+    }
+    // Fallback 2: if TAA+MSAA failed, try TAA with 1 sample (no MSAA benefit, still has temporal)
+    if (aaMode === 'taa') {
+      try {
+        console.warn('[blackhole-web] Retrying TAA with no MSAA');
+        const p = allocPipeline(gl, width, height, 'rgba8', 'taa', 1);
+        return { pipeline: p, format: 'rgba8' };
+      } catch (e3) {
+        console.warn('[blackhole-web] TAA with 1 sample also failed:', e3);
+      }
+      // Fallback 3: try FXAA as last resort for antialiasing
+      try {
+        console.warn('[blackhole-web] Trying FXAA as final fallback');
+        return { pipeline: allocPipeline(gl, width, height, 'rgba8', 'fxaa', 0), format: 'rgba8' };
+      } catch (e4) {
+        console.warn('[blackhole-web] FXAA also failed:', e4);
+      }
+    }
+    // Last resort: off mode with rgba8
+    try {
+      console.warn('[blackhole-web] Using off/fxaa mode as final fallback');
+      return { pipeline: allocPipeline(gl, width, height, 'rgba8', 'off', 0), format: 'rgba8' };
+    } catch (e5) {
+      console.error('[blackhole-web] All fallbacks exhausted:', e5);
     }
     throw new Error('无法创建离屏渲染目标');
   }
@@ -640,9 +679,14 @@ async function main(): Promise<void> {
     '关闭 (Off)': 'off',
     '快速边缘平滑 (FXAA)': 'fxaa',
     '时序抗锯齿 (TAA)': 'taa',
-  }).name('抗锯齿').onChange(() => resizeNow());
+  }).name('抗锯齿').onChange((v: AntialiasMode) => {
+    fxaaQualityCtrl.domElement.style.display = v === 'fxaa' ? '' : 'none';
+    msaaSamplesCtrl.domElement.style.display = v === 'taa' ? '' : 'none';
+    taaFeedbackCtrl.domElement.style.display = v === 'taa' ? '' : 'none';
+    resizeNow();
+  });
 
-  gui.add(params, 'fxaaQuality', {
+  const fxaaQualityCtrl = gui.add(params, 'fxaaQuality', {
     '低 (Low)': 0,
     '中 (Medium)': 1,
     '高 (High)': 2,
@@ -652,17 +696,24 @@ async function main(): Promise<void> {
     }
   });
 
-  gui.add(params, 'msaaSamples', {
+  const msaaSamplesCtrl = gui.add(params, 'msaaSamples', {
     '2x': 2,
     '4x': 4,
     '8x': 8,
   }).name('MSAA采样').onChange(() => resizeNow());
 
-  gui.add(params, 'taaFeedback', 1, 20, 0.5).name('TAA反馈').onChange(() => {
+  const taaFeedbackCtrl = gui.add(params, 'taaFeedback', 1, 20, 0.5).name('TAA反馈').onChange(() => {
     if (passes.taaBlend) {
       setF(gl, passes.taaBlend.program, passes.taaBlend.uniforms, 'taaFeedback', params.taaFeedback);
     }
   });
+  // Set initial visibility based on default antialias mode
+  const updateAAUIControls = (mode: AntialiasMode) => {
+    fxaaQualityCtrl.domElement.style.display = mode === 'fxaa' ? '' : 'none';
+    msaaSamplesCtrl.domElement.style.display = mode === 'taa' ? '' : 'none';
+    taaFeedbackCtrl.domElement.style.display = mode === 'taa' ? '' : 'none';
+  };
+  updateAAUIControls(params.antialias);
 
   const bodyFolders: GUI[] = [];
   function syncBodyFolders(): void {

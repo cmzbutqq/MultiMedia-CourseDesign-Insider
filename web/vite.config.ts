@@ -26,6 +26,16 @@ export default defineConfig({
       clientPort: 5174,
     },
     cors: true,
+    proxy: {
+      '/health': {
+        target: process.env.VITE_SERVER_URL || 'http://localhost:5000',
+        changeOrigin: true,
+      },
+      '/api/detect': {
+        target: process.env.VITE_SERVER_URL || 'http://localhost:5000',
+        changeOrigin: true,
+      },
+    },
   },
   publicDir: 'public',
 });

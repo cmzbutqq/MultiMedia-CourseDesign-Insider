@@ -40,6 +40,8 @@ export class ServerGestureClient {
   private velocityX: number = 0;
   private velocityY: number = 0;
   private velocityDamping: number = 0.85;
+  private pendingRequests: number = 0;
+  private maxPendingRequests: number = 2;
 
   private gestureState: GestureState = {
     palmX: 0.5,
@@ -128,9 +130,17 @@ export class ServerGestureClient {
   }
 
   private async sendFrameForDetection(imageData: string): Promise<void> {
+    if (this.pendingRequests >= this.maxPendingRequests) {
+      console.warn('[ServerGesture] Skipping frame - too many pending requests');
+      return;
+    }
+
+    this.pendingRequests++;
+
     try {
-      // 使用相对路径，通过nginx代理访问服务器
       const url = `/api/detect`;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
 
       const response = await fetch(url, {
         method: 'POST',
@@ -138,7 +148,11 @@ export class ServerGestureClient {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ image: imageData }),
+        signal: controller.signal,
       });
+
+      clearTimeout(timeoutId);
+      this.pendingRequests--;
 
       if (!response.ok) {
         console.warn('[ServerGesture] 检测请求失败:', response.status);
@@ -148,7 +162,12 @@ export class ServerGestureClient {
       const result = await response.json();
       this.processServerResults(result);
     } catch (error) {
-      console.warn('[ServerGesture] 发送帧失败:', error);
+      this.pendingRequests--;
+      if (error instanceof Error && error.name === 'AbortError') {
+        console.warn('[ServerGesture] Request timeout');
+      } else {
+        console.warn('[ServerGesture] 发送帧失败:', error);
+      }
     }
   }
 
@@ -395,6 +414,7 @@ export class ServerGestureClient {
   disable(): void {
     this.enabled = false;
     this.stopFrameCapture();
+    this.pendingRequests = 0;
     this.resetGestureState();
     console.log('[ServerGesture] 手势识别已禁用');
   }
