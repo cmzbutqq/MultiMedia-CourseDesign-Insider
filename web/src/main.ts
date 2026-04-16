@@ -50,9 +50,25 @@ import taaBlendFrag from '../shader/taa_blend.frag?raw';
 
 const MAX_BLOOM_ITER = 8;
 const MAX_DPR = 2;
+const LENS_MASS_REF = 10;
 
 type AntialiasMode = 'off' | 'fxaa' | 'taa';
 type GestureMode = 'local' | 'server';
+
+function bodyKindShaderValue(k: BodyKind): number {
+  if (k === 'blackHole') return 0;
+  if (k === 'whiteHole') return 1;
+  return 2;
+}
+
+function parseHexColorRgb(hex: string): [number, number, number] {
+  const h = hex.replace('#', '');
+  if (h.length !== 6) return [0, 0, 0];
+  const r = parseInt(h.slice(0, 2), 16) / 255;
+  const g = parseInt(h.slice(2, 4), 16) / 255;
+  const b = parseInt(h.slice(4, 6), 16) / 255;
+  return [r, g, b];
+}
 
 interface Params {
   antialias: AntialiasMode;
