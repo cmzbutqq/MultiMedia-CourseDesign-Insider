@@ -519,9 +519,19 @@ async function main(): Promise<void> {
         return await initLocalGesture();
       }
     } catch (error) {
-      handOverlay!.textContent = '手势: 初始化错误';
-      handOverlay!.style.color = '#ff4444';
+      if (handOverlay?.isConnected) {
+        handOverlay.textContent = '手势: 初始化错误';
+        handOverlay.style.color = '#ff4444';
+      }
       console.error('[blackhole-web] 手势控制初始化错误:', error);
+      if (serverGestureClient) {
+        serverGestureClient.destroy();
+        serverGestureClient = null;
+      }
+      if (handGestureController) {
+        handGestureController.destroy();
+        handGestureController = null;
+      }
       return false;
     }
   }
@@ -547,9 +557,13 @@ async function main(): Promise<void> {
       console.log('[blackhole-web] 本地手势控制初始化成功');
       return true;
     } else {
-      handOverlay!.textContent = '手势: 摄像头不可用';
-      handOverlay!.style.color = '#ff4444';
+      if (handOverlay?.isConnected) {
+        handOverlay.textContent = '手势: 摄像头不可用';
+        handOverlay.style.color = '#ff4444';
+      }
       console.error('[blackhole-web] 本地手势控制初始化失败');
+      handGestureController.destroy();
+      handGestureController = null;
       return false;
     }
   }
@@ -582,13 +596,18 @@ async function main(): Promise<void> {
       });
 
       serverGestureClient.enable();
-      handOverlay!.textContent = '手势: 服务器模式已连接';
+      if (handOverlay?.isConnected) {
+        handOverlay.textContent = '手势: 服务器模式已连接';
+      }
       console.log('[blackhole-web] 服务器端手势控制初始化成功');
       return true;
     } else {
-      handOverlay!.textContent = '手势: 服务器连接失败';
-      handOverlay!.style.color = '#ff4444';
+      if (handOverlay?.isConnected) {
+        handOverlay.textContent = '手势: 初始化失败';
+        handOverlay.style.color = '#ff4444';
+      }
       console.error('[blackhole-web] 服务器端手势控制初始化失败');
+      serverGestureClient.destroy();
       return false;
     }
   }
@@ -632,7 +651,7 @@ async function main(): Promise<void> {
 
     if (!state.handDetected) {
       if (handOverlay) {
-        handOverlay.textContent = '手势 [本地]: 未检测到手';
+        handOverlay.textContent = `手势: 正在初始化（本地模式）`;
       }
     }
   }
@@ -866,12 +885,16 @@ async function main(): Promise<void> {
         serverGestureClient.destroy();
         serverGestureClient = null;
       }
-      handVideo?.remove();
-      handCanvas?.remove();
-      handOverlay?.remove();
+      // Save DOM refs before nulling them, then remove from DOM
+      const v = handVideo;
+      const c = handCanvas;
+      const o = handOverlay;
       handVideo = null;
       handCanvas = null;
       handOverlay = null;
+      v?.remove();
+      c?.remove();
+      o?.remove();
       previousGestureMode = 'off';
       return;
     }
@@ -888,27 +911,28 @@ async function main(): Promise<void> {
         serverGestureClient.destroy();
         serverGestureClient = null;
       }
-      handVideo?.remove();
-      handCanvas?.remove();
-      handOverlay?.remove();
+      // Save DOM refs before nulling them, then remove from DOM
+      const v = handVideo;
+      const c = handCanvas;
+      const o = handOverlay;
       handVideo = null;
       handCanvas = null;
       handOverlay = null;
+      v?.remove();
+      c?.remove();
+      o?.remove();
     }
 
     // Initialize the new mode
     const success = await initHandGesture();
     if (!success) {
-      // Cleanup created DOM elements and references, but don't modify params
-      // so GUI state stays in sync with actual state
-      handVideo?.remove();
-      handCanvas?.remove();
-      handOverlay?.remove();
-      handVideo = null;
-      handCanvas = null;
-      handOverlay = null;
+      // Don't remove DOM elements here - keep error message visible so user can see it
+      // Don't null handVideo/handCanvas/handOverlay so "off" cleanup can still remove them
       handGestureController = null;
-      serverGestureClient = null;
+      if (serverGestureClient) {
+        serverGestureClient.destroy();
+        serverGestureClient = null;
+      }
       return;
     }
 
