@@ -169,16 +169,12 @@ function allocPipeline(
 ): PipelineRTs {
   const main = createColorRT(gl, width, height, format);
   // createMSAART returns null if MSAA is not supported on this device
+  // Note: if it returns null with samples > 1 due to MAX_SAMPLES or texImage2DMultisample
+  // issues, retrying with 1 sample will also fail - detect that and skip MSAA entirely
   let mainMsaa = aaMode === 'taa' ? createMSAART(gl, width, height, format, msaaSamples) : null;
   let mainResolved = mainMsaa ? createColorRT(gl, width, height, format) : null;
-  // If MSAA is not supported but we requested TAA, try with 1 sample or fall back to no MSAA
-  if (aaMode === 'taa' && !mainMsaa && msaaSamples > 1) {
-    console.warn('[blackhole-web] TAA with MSAA unavailable, trying with reduced samples');
-    mainMsaa = createMSAART(gl, width, height, format, 1);
-    if (mainMsaa) {
-      mainResolved = createColorRT(gl, width, height, format);
-    }
-  }
+  // If MSAA returned null but we have samples > 1, it means device can't do MSAA
+  // (not just that samples were clamped to 1) - don't retry, just run TAA without MSAA
   const brightness = createColorRT(gl, width, height, format);
   const bloomFinal = createColorRT(gl, width, height, format);
   const tonemapped = createColorRT(gl, width, height, format);
@@ -219,14 +215,22 @@ function tryAllocPipeline(
         console.warn('[blackhole-web] Pipeline allocation with rgba8 also failed:', e2);
       }
     }
-    // Fallback 2: if TAA+MSAA failed, try TAA with 1 sample (no MSAA benefit, still has temporal)
-    if (aaMode === 'taa') {
-      try {
-        console.warn('[blackhole-web] Retrying TAA with no MSAA');
-        const p = allocPipeline(gl, width, height, 'rgba8', 'taa', 1);
-        return { pipeline: p, format: 'rgba8' };
-      } catch (e3) {
-        console.warn('[blackhole-web] TAA with 1 sample also failed:', e3);
+    // Fallback 2: if TAA failed with MSAA samples > 1, try TAA with samples clamped to 1
+    // But skip this if createMSAART was failing due to missing texImage2DMultisample
+    // In that case just fall back to FXAA or off directly
+    if (aaMode === 'taa' && msaaSamples > 1) {
+      // Check if maxSamples is available - if not, MSAA won't work at any sample count
+      const maxSamples = gl.getParameter(gl.MAX_SAMPLES);
+      if (maxSamples > 0) {
+        try {
+          console.warn('[blackhole-web] Retrying TAA with reduced MSAA samples');
+          const p = allocPipeline(gl, width, height, 'rgba8', 'taa', 1);
+          return { pipeline: p, format: 'rgba8' };
+        } catch (e3) {
+          console.warn('[blackhole-web] TAA with 1 sample also failed:', e3);
+        }
+      } else {
+        console.warn('[blackhole-web] MAX_SAMPLES=0, skipping MSAA retry');
       }
       // Fallback 3: try FXAA as last resort for antialiasing
       try {
@@ -236,12 +240,18 @@ function tryAllocPipeline(
         console.warn('[blackhole-web] FXAA also failed:', e4);
       }
     }
-    // Last resort: off mode with rgba8
-    try {
-      console.warn('[blackhole-web] Using off/fxaa mode as final fallback');
-      return { pipeline: allocPipeline(gl, width, height, 'rgba8', 'off', 0), format: 'rgba8' };
-    } catch (e5) {
-      console.error('[blackhole-web] All fallbacks exhausted:', e5);
+    // If we get here with TAA mode, try FXAA or off as last resort
+    if (aaMode === 'taa') {
+      try {
+        return { pipeline: allocPipeline(gl, width, height, 'rgba8', 'fxaa', 0), format: 'rgba8' };
+      } catch (e5) {
+        console.warn('[blackhole-web] FXAA also failed:', e5);
+      }
+      try {
+        return { pipeline: allocPipeline(gl, width, height, 'rgba8', 'off', 0), format: 'rgba8' };
+      } catch (e6) {
+        console.error('[blackhole-web] All fallbacks exhausted:', e6);
+      }
     }
     throw new Error('无法创建离屏渲染目标');
   }
