@@ -54,7 +54,7 @@ export class ServerGestureClient {
     this.config = {
       host: config?.host || 'localhost',
       port: config?.port || 5000,
-      useSSL: false,
+      useSSL: config?.useSSL ?? false,
     };
   }
 
