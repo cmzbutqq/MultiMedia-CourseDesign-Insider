@@ -144,15 +144,13 @@ export class HandGestureController {
           console.warn('[HandGesture] play()被阻止或失败:', playErr);
           // 继续，因为流已经获取到了
         }
-
-        console.log('[HandGesture] 摄像头初始化成功');
-        return true;
       } catch (err) {
         console.error('[HandGesture] 摄像头初始化失败:', err);
         return false;
       }
 
       this.isInitialized = true;
+      console.log('[HandGesture] 摄像头初始化成功');
       console.log('[HandGesture] 手势控制初始化成功');
       return true;
     } catch (error) {
