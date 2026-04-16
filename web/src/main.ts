@@ -53,7 +53,7 @@ const MAX_DPR = 2;
 const LENS_MASS_REF = 10;
 
 type AntialiasMode = 'off' | 'fxaa' | 'taa';
-type GestureMode = 'local' | 'server';
+type GestureMode = 'off' | 'local' | 'server';
 
 function bodyKindShaderValue(k: BodyKind): number {
   if (k === 'blackHole') return 0;
@@ -78,8 +78,7 @@ interface Params {
   gravatationalLensing: boolean;
   renderBlackHole: boolean;
   mouseControl: boolean;
-  handControl: boolean;
-  gestureMode: GestureMode;
+  gestureMode: 'off' | 'local' | 'server';
   cameraRoll: number;
   frontView: boolean;
   topView: boolean;
@@ -106,8 +105,7 @@ const params: Params = {
   gravatationalLensing: true,
   renderBlackHole: true,
   mouseControl: true,
-  handControl: false,
-  gestureMode: 'local',
+  gestureMode: 'off',
   cameraRoll: 0,
   frontView: false,
   topView: false,
@@ -265,10 +263,11 @@ function ulCache(
   cache: UniformMap,
   name: string,
 ): WebGLUniformLocation | null {
-  if (!cache.has(name)) {
-    cache.set(name, gl.getUniformLocation(program, name));
-  }
-  return cache.get(name)!;
+  const cached = cache.get(name);
+  if (cached !== undefined) return cached;
+  const loc = gl.getUniformLocation(program, name);
+  cache.set(name, loc);
+  return loc;
 }
 
 function setF(
@@ -278,6 +277,7 @@ function setF(
   name: string,
   v: number,
 ): void {
+  gl.useProgram(program);
   const loc = ulCache(gl, program, cache, name);
   if (loc) gl.uniform1f(loc, v);
 }
@@ -290,6 +290,7 @@ function setV2(
   x: number,
   y: number,
 ): void {
+  gl.useProgram(program);
   const loc = ulCache(gl, program, cache, name);
   if (loc) gl.uniform2f(loc, x, y);
 }
@@ -301,6 +302,7 @@ function setI1(
   name: string,
   v: number,
 ): void {
+  gl.useProgram(program);
   const loc = ulCache(gl, program, cache, name);
   if (loc) gl.uniform1i(loc, v);
 }
@@ -350,6 +352,7 @@ function setV3(
   y: number,
   z: number,
 ): void {
+  gl.useProgram(program);
   const loc = ulCache(gl, program, cache, name);
   if (loc) gl.uniform3f(loc, x, y, z);
 }
@@ -482,6 +485,7 @@ async function main(): Promise<void> {
   let handVideo: HTMLVideoElement | null = null;
   let handCanvas: HTMLCanvasElement | null = null;
   let handOverlay: HTMLDivElement | null = null;
+  let previousGestureMode: 'off' | 'local' | 'server' = 'off';
   let handX = 0.5;
   let handY = 0.5;
 
@@ -606,7 +610,7 @@ async function main(): Promise<void> {
   const frameInterval = 100;
 
   async function updateHandGesture(): Promise<void> {
-    if (!params.handControl) return;
+    if (params.gestureMode === 'off') return;
 
     if (params.gestureMode === 'server') {
       return;
@@ -846,78 +850,77 @@ async function main(): Promise<void> {
   gui.add(params, 'renderBlackHole');
   gui.add(params, 'mouseControl');
   gui.add(params, 'gestureMode', {
-    '本地模式': 'local',
-    '服务器模式': 'server',
-  }).name('手势识别模式').onChange(async () => {
-    if (params.handControl) {
-      if (params.gestureMode === 'server') {
-        // Switching to server mode - destroy local controller completely
-        if (handGestureController) {
-          handGestureController.destroy();
-          handGestureController = null;
-        }
-        // Clean up DOM elements before creating new ones
-        handVideo?.remove();
-        handCanvas?.remove();
-        handOverlay?.remove();
-        handVideo = null;
-        handCanvas = null;
-        handOverlay = null;
-        // Reinitialize server client
-        const success = await initHandGesture();
-        if (!success) {
-          params.handControl = false;
-          return;
-        }
-      } else {
-        // Switching to local mode - destroy server client completely
-        if (serverGestureClient) {
-          serverGestureClient.destroy();
-          serverGestureClient = null;
-        }
-        // Clean up DOM elements before creating new ones
-        handVideo?.remove();
-        handCanvas?.remove();
-        handOverlay?.remove();
-        handVideo = null;
-        handCanvas = null;
-        handOverlay = null;
-        // Reinitialize local controller
-        const success = await initHandGesture();
-        if (!success) {
-          params.handControl = false;
-          return;
-        }
+    '关闭': 'off',
+    '本地计算': 'local',
+    '服务器计算': 'server',
+  }).name('手势识别').onChange(async (mode: 'off' | 'local' | 'server') => {
+    if (mode === previousGestureMode && mode !== 'off') return;
+
+    if (mode === 'off') {
+      // Clean up all gesture resources
+      if (handGestureController) {
+        handGestureController.destroy();
+        handGestureController = null;
       }
+      if (serverGestureClient) {
+        serverGestureClient.destroy();
+        serverGestureClient = null;
+      }
+      handVideo?.remove();
+      handCanvas?.remove();
+      handOverlay?.remove();
+      handVideo = null;
+      handCanvas = null;
+      handOverlay = null;
+      previousGestureMode = 'off';
+      return;
     }
-  });
-  gui.add(params, 'handControl').name('手势控制').onChange(async (enabled: boolean) => {
-    if (enabled) {
-      if (params.gestureMode === 'server') {
-        if (!serverGestureClient) {
-          const success = await initHandGesture();
-          if (!success) {
-            params.handControl = false;
-          }
-        } else {
-          serverGestureClient.enable();
-        }
-      } else {
-        if (!handGestureController) {
-          const success = await initHandGesture();
-          if (!success) {
-            params.handControl = false;
-          }
-        } else {
-          handGestureController.setEnabled(true);
-        }
+
+    // Switching to a different mode (local or server)
+    const prevMode = previousGestureMode;
+    if (prevMode !== 'off') {
+      // Clean up previous mode resources
+      if (handGestureController) {
+        handGestureController.destroy();
+        handGestureController = null;
       }
-    } else {
-      if (params.gestureMode === 'server') {
-        serverGestureClient?.disable();
-      } else {
-        handGestureController?.setEnabled(false);
+      if (serverGestureClient) {
+        serverGestureClient.destroy();
+        serverGestureClient = null;
       }
+      handVideo?.remove();
+      handCanvas?.remove();
+      handOverlay?.remove();
+      handVideo = null;
+      handCanvas = null;
+      handOverlay = null;
+    }
+
+    // Initialize the new mode
+    const success = await initHandGesture();
+    if (!success) {
+      // Cleanup created DOM elements and references, but don't modify params
+      // so GUI state stays in sync with actual state
+      handVideo?.remove();
+      handCanvas?.remove();
+      handOverlay?.remove();
+      handVideo = null;
+      handCanvas = null;
+      handOverlay = null;
+      handGestureController = null;
+      serverGestureClient = null;
+      return;
+    }
+
+    // If mode changed while awaiting, abort
+    if (params.gestureMode !== mode) return;
+
+    previousGestureMode = mode;
+
+    if (mode === 'server' && serverGestureClient) {
+      serverGestureClient.enable();
+    } else if (mode === 'local' && handGestureController) {
+      handGestureController.setEnabled(true);
     }
   });
   gui.add(params, 'cameraRoll', -180, 180);
