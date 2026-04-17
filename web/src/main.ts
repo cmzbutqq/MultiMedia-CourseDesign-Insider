@@ -662,6 +662,8 @@ async function main(): Promise<void> {
   let lastAntialiasMode: AntialiasMode = params.antialias;
   let firstFrame = true;
   let taaIdx = 0;
+  let rebuildScheduled = false;
+  let pendingResizeSource: 'resize-observer' | 'gui-antialias' | 'gui-msaa' | null = 'startup';
 
   function resetTaaHistory(): void {
     firstFrame = true;
@@ -712,9 +714,23 @@ async function main(): Promise<void> {
     }
   }
 
-  const ro = new ResizeObserver(() => resizeNow());
+  function scheduleResizeNow(source: 'resize-observer' | 'gui-antialias' | 'gui-msaa' | 'startup'): void {
+    pendingResizeSource = source;
+    if (rebuildScheduled) return;
+    rebuildScheduled = true;
+    requestAnimationFrame(() => {
+      rebuildScheduled = false;
+      if (!pendingResizeSource) return;
+      pendingResizeSource = null;
+      resizeNow();
+    });
+  }
+
+  const ro = new ResizeObserver(() => {
+    scheduleResizeNow('resize-observer');
+  });
   ro.observe(canvas);
-  resizeNow();
+  scheduleResizeNow('startup');
 
   const gui = new GUI({ title: '参数' });
 
@@ -726,7 +742,7 @@ async function main(): Promise<void> {
     fxaaQualityCtrl.domElement.style.display = v === 'fxaa' ? '' : 'none';
     msaaSamplesCtrl.domElement.style.display = v === 'taa' ? '' : 'none';
     taaFeedbackCtrl.domElement.style.display = v === 'taa' ? '' : 'none';
-    resizeNow();
+    scheduleResizeNow('gui-antialias');
   });
 
   const fxaaQualityCtrl = gui.add(params, 'fxaaQuality', {
@@ -743,7 +759,9 @@ async function main(): Promise<void> {
     '2x': 2,
     '4x': 4,
     '8x': 8,
-  }).name('MSAA采样').onChange(() => resizeNow());
+  }).name('MSAA采样').onChange(() => {
+    scheduleResizeNow('gui-msaa');
+  });
 
   const taaFeedbackCtrl = gui.add(params, 'taaFeedback', 1, 20, 0.5).name('TAA反馈').onChange(() => {
     if (passes.taaBlend) {
