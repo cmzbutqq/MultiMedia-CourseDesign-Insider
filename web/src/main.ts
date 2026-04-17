@@ -659,6 +659,14 @@ async function main(): Promise<void> {
   let pipeline: PipelineRTs | null = null;
   let rtFormat: ColorRTFormat = 'rgba8';
   let lastMsaaSamples = params.msaaSamples;
+  let lastAntialiasMode: AntialiasMode = params.antialias;
+  let firstFrame = true;
+  let taaIdx = 0;
+
+  function resetTaaHistory(): void {
+    firstFrame = true;
+    taaIdx = 0;
+  }
 
   function resizeTrailCanvas(): void {
     if (!trailCanvas || !trailCtx) return;
@@ -678,12 +686,16 @@ async function main(): Promise<void> {
     const w = Math.max(1, Math.floor(canvas.clientWidth * dpr));
     const h = Math.max(1, Math.floor(canvas.clientHeight * dpr));
     const needsMsaaRebuild = pipeline && params.msaaSamples !== lastMsaaSamples;
-    if (canvas.width === w && canvas.height === h && pipeline && !needsMsaaRebuild) {
+    const needsAaModeRebuild = pipeline && params.antialias !== lastAntialiasMode;
+    if (canvas.width === w && canvas.height === h && pipeline && !needsMsaaRebuild && !needsAaModeRebuild) {
       resizeTrailCanvas();
       return;
     }
     if (needsMsaaRebuild) {
       lastMsaaSamples = params.msaaSamples;
+    }
+    if (needsAaModeRebuild) {
+      lastAntialiasMode = params.antialias;
     }
     canvas.width = w;
     canvas.height = h;
@@ -691,6 +703,7 @@ async function main(): Promise<void> {
     const r = tryAllocPipeline(gl, w, h, params.antialias, params.msaaSamples);
     pipeline = r.pipeline;
     rtFormat = r.format;
+    resetTaaHistory();
     resizeTrailCanvas();
     if (rtFormat === 'rgba8') {
       console.warn(
@@ -698,9 +711,6 @@ async function main(): Promise<void> {
       );
     }
   }
-
-  let firstFrame = true;
-  let taaIdx = 0;
 
   const ro = new ResizeObserver(() => resizeNow());
   ro.observe(canvas);
