@@ -42,6 +42,8 @@ export class ServerGestureClient {
   private velocityDamping: number = 0.85;
   private pendingRequests: number = 0;
   private maxPendingRequests: number = 2;
+  private readonly activeControllers: Set<AbortController> = new Set();
+  private readonly preferRelativeUrls: boolean;
 
   private gestureState: GestureState = {
     palmX: 0.5,
@@ -58,6 +60,7 @@ export class ServerGestureClient {
       port: config?.port || 5000,
       useSSL: config?.useSSL ?? false,
     };
+    this.preferRelativeUrls = config?.host == null && config?.port == null && config?.useSSL == null;
   }
 
   public setSmoothingFactor(factor: number): void {
@@ -107,10 +110,18 @@ export class ServerGestureClient {
     }
   }
 
+  private buildUrl(path: string): string {
+    const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+    if (this.preferRelativeUrls) {
+      return normalizedPath;
+    }
+    const protocol = this.config.useSSL ? 'https' : 'http';
+    return `${protocol}://${this.config.host}:${this.config.port}${normalizedPath}`;
+  }
+
   private async checkServerConnection(): Promise<boolean> {
     try {
-      // 使用相对路径，通过nginx代理访问服务器
-      const url = `/health`;
+      const url = this.buildUrl('/health');
 
       console.log(`[ServerGesture] 检查服务器连接: ${url}`);
       const response = await fetch(url);
@@ -136,11 +147,12 @@ export class ServerGestureClient {
     }
 
     this.pendingRequests++;
+    const controller = new AbortController();
+    this.activeControllers.add(controller);
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
 
     try {
-      const url = `/api/detect`;
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 5000);
+      const url = this.buildUrl('/api/detect');
 
       const response = await fetch(url, {
         method: 'POST',
@@ -151,23 +163,26 @@ export class ServerGestureClient {
         signal: controller.signal,
       });
 
-      clearTimeout(timeoutId);
-      this.pendingRequests--;
-
       if (!response.ok) {
         console.warn('[ServerGesture] 检测请求失败:', response.status);
         return;
       }
 
       const result = await response.json();
+      if (!this.enabled) {
+        return;
+      }
       this.processServerResults(result);
     } catch (error) {
-      this.pendingRequests--;
       if (error instanceof Error && error.name === 'AbortError') {
         console.warn('[ServerGesture] Request timeout');
       } else {
         console.warn('[ServerGesture] 发送帧失败:', error);
       }
+    } finally {
+      clearTimeout(timeoutId);
+      this.activeControllers.delete(controller);
+      this.pendingRequests = Math.max(0, this.pendingRequests - 1);
     }
   }
 
@@ -414,7 +429,10 @@ export class ServerGestureClient {
   disable(): void {
     this.enabled = false;
     this.stopFrameCapture();
-    this.pendingRequests = 0;
+    for (const controller of this.activeControllers) {
+      controller.abort();
+    }
+    this.activeControllers.clear();
     this.resetGestureState();
     console.log('[ServerGesture] 手势识别已禁用');
   }

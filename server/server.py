@@ -6,6 +6,7 @@ GPU 加速版本
 """
 
 import base64
+import binascii
 import io
 import json
 import os
@@ -32,6 +33,16 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', os.urandom(32).hex())
 
+# Limit payload size to reduce DoS risk from oversized frames.
+MAX_IMAGE_BYTES = int(os.environ.get('MAX_IMAGE_BYTES', str(2 * 1024 * 1024)))
+MAX_IMAGE_BASE64_CHARS = ((MAX_IMAGE_BYTES + 2) // 3) * 4
+MAX_SOCKETIO_BUFFER_SIZE = int(
+    os.environ.get('MAX_SOCKETIO_BUFFER_SIZE', str(MAX_IMAGE_BASE64_CHARS + 1024))
+)
+app.config['MAX_CONTENT_LENGTH'] = int(
+    os.environ.get('MAX_CONTENT_LENGTH', str(MAX_IMAGE_BASE64_CHARS + 1024))
+)
+
 _cors_origins = [
     os.environ.get('CORS_ORIGIN', 'http://localhost:5173'),
 ]
@@ -39,8 +50,31 @@ CORS(app, origins=[o for o in _cors_origins if o])
 
 socketio = SocketIO(app,
     cors_allowed_origins=os.environ.get('SOCKETIO_ORIGINS', 'http://localhost:5173').split(','),
-    async_mode='eventlet'
+    async_mode='eventlet',
+    max_http_buffer_size=MAX_SOCKETIO_BUFFER_SIZE
 )
+
+def _strip_data_url_prefix(image_b64: str) -> str:
+    """Strip optional data URL prefix from base64 image data."""
+    return image_b64.split(',', 1)[1] if ',' in image_b64 else image_b64
+
+def _decode_image_payload(image_b64: Any) -> bytes:
+    """Validate and decode image payload, raising ValueError on invalid input."""
+    if not isinstance(image_b64, str) or not image_b64.strip():
+        raise ValueError('image 必须是非空 base64 字符串')
+
+    payload = _strip_data_url_prefix(image_b64.strip())
+    if len(payload) > MAX_IMAGE_BASE64_CHARS:
+        raise ValueError(f'image payload 过大，最大允许 {MAX_IMAGE_BYTES} 字节原始图像')
+
+    try:
+        return base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError('image 不是有效的 base64 编码') from exc
+
+@app.errorhandler(413)
+def request_too_large(_error):
+    return jsonify({'error': f'请求体过大，最大允许 {MAX_IMAGE_BYTES} 字节图像'}), 413
 
 class GestureType(Enum):
     NONE = "none"
@@ -281,17 +315,21 @@ def detect_hand():
         data = request.get_json()
         if not data or 'image' not in data:
             return jsonify({'error': '缺少 image 字段'}), 400
-        
-        image_b64 = data['image']
-        if ',' in image_b64:
-            image_b64 = image_b64.split(',')[1]
-        
-        image_data = base64.b64decode(image_b64)
-        
+
+        if gesture_detector is None:
+            return jsonify({'error': '检测器未初始化'}), 503
+
+        try:
+            image_data = _decode_image_payload(data['image'])
+        except ValueError as exc:
+            err = str(exc)
+            status = 413 if '过大' in err else 400
+            return jsonify({'error': err}), status
+
         result = gesture_detector.process_frame(image_data)
-        
+
         return jsonify(result)
-        
+
     except Exception as e:
         logger.error(f"API 处理错误: {e}")
         return jsonify({'error': str(e)}), 500
@@ -331,17 +369,22 @@ def handle_video_frame(data):
     client_id = request.sid
     
     try:
+        if gesture_detector is None:
+            emit('frame_error', {'error': '检测器未初始化'})
+            return
+
         if 'image' not in data:
             emit('frame_error', {'error': '缺少 image 字段'})
             return
-        
-        image_b64 = data['image']
-        if ',' in image_b64:
-            image_b64 = image_b64.split(',')[1]
-        
-        image_data = base64.b64decode(image_b64)
+
+        try:
+            image_data = _decode_image_payload(data['image'])
+        except ValueError as exc:
+            emit('frame_error', {'error': str(exc)})
+            return
+
         timestamp = data.get('timestamp', int(time.time() * 1000))
-        
+
         result = gesture_detector.process_frame(image_data, timestamp)
         
         if client_id in clients:
