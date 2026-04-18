@@ -55,26 +55,6 @@ const LENS_MASS_REF = 10;
 type AntialiasMode = 'off' | 'fxaa' | 'taa';
 type GestureMode = 'off' | 'local' | 'server';
 
-function agentDebugLog(
-  hypothesisId: string,
-  location: string,
-  message: string,
-  data: Record<string, unknown>,
-): void {
-  const payload = { hypothesisId, location, message, data, timestamp: Date.now() };
-  try {
-    const bridge = (globalThis as { __agentDebugLog?: (entry: unknown) => void }).__agentDebugLog;
-    if (typeof bridge === 'function') {
-      bridge(payload);
-      return;
-    }
-    const req = (0, eval)('require') as ((name: string) => { appendFileSync: (path: string, line: string) => void });
-    req('fs').appendFileSync('/opt/cursor/logs/debug.log', `${JSON.stringify(payload)}\n`);
-  } catch {
-    console.debug('[agent-debug]', payload);
-  }
-}
-
 interface PipelineAllocResult {
   pipeline: PipelineRTs;
   format: ColorRTFormat;
@@ -226,9 +206,6 @@ function tryAllocPipeline(
   aaMode: AntialiasMode,
   msaaSamples: number,
 ): PipelineAllocResult {
-  // #region agent log
-  agentDebugLog('C', 'web/src/main.ts:tryAllocPipeline', 'tryAllocPipeline entry', { width, height, aaMode, msaaSamples });
-  // #endregion
   const preferred = detectRTFormat(gl);
   try {
     return {
@@ -270,9 +247,6 @@ function tryAllocPipeline(
       // Fallback 3: try FXAA as last resort for antialiasing
       try {
         console.warn('[blackhole-web] Trying FXAA as final fallback');
-        // #region agent log
-        agentDebugLog('C', 'web/src/main.ts:tryAllocPipeline', 'Fallback selected FXAA', { preferred, aaMode, msaaSamples });
-        // #endregion
         return {
           pipeline: allocPipeline(gl, width, height, 'rgba8', 'fxaa', 0),
           format: 'rgba8',
@@ -639,14 +613,6 @@ async function main(): Promise<void> {
 
   async function initServerGesture(): Promise<boolean> {
     console.log('[ServerGesture] window.location.protocol:', window.location.protocol);
-    // #region agent log
-    agentDebugLog('A', 'web/src/main.ts:initServerGesture', 'Server gesture target resolved', {
-      protocol: window.location.protocol,
-      hostname: window.location.hostname,
-      configuredHost: '<relative>',
-      configuredPort: '<relative>',
-    });
-    // #endregion
     serverGestureClient = new ServerGestureClient();
 
     const success = await serverGestureClient.initialize(handVideo!, handCanvas!);
@@ -731,7 +697,6 @@ async function main(): Promise<void> {
   let lastMsaaSamples = params.msaaSamples;
   let lastAntialiasMode: AntialiasMode = params.antialias;
   let activeAntialiasMode: AntialiasMode = params.antialias;
-  let aaMismatchLogged = false;
   let firstFrame = true;
   let taaIdx = 0;
   let rebuildScheduled = false;
@@ -778,16 +743,6 @@ async function main(): Promise<void> {
     pipeline = r.pipeline;
     rtFormat = r.format;
     activeAntialiasMode = r.effectiveAaMode;
-    // #region agent log
-    agentDebugLog('C', 'web/src/main.ts:resizeNow', 'Pipeline rebuilt', {
-      requestedAntialias: params.antialias,
-      effectiveAntialias: activeAntialiasMode,
-      requestedMsaaSamples: params.msaaSamples,
-      hasTaaBuffers: Boolean(pipeline.taaBuffers),
-      hasMainMsaa: Boolean(pipeline.mainMsaa),
-      rtFormat,
-    });
-    // #endregion
     resetTaaHistory();
     resizeTrailCanvas();
     if (rtFormat === 'rgba8') {
@@ -985,19 +940,6 @@ async function main(): Promise<void> {
     '服务器计算': 'server',
   }).name('手势识别').onChange((mode: 'off' | 'local' | 'server') => {
     const modeSwitchToken = ++gestureInitToken;
-    // #region agent log
-    agentDebugLog('B', 'web/src/main.ts:gestureModeOnChange', 'Gesture mode change requested', {
-      modeSwitchToken,
-      requestedMode: mode,
-      previousGestureMode,
-      paramsGestureMode: params.gestureMode,
-      hasHandGestureController: Boolean(handGestureController),
-      hasServerGestureClient: Boolean(serverGestureClient),
-      hasHandVideo: Boolean(handVideo),
-      hasHandCanvas: Boolean(handCanvas),
-      hasHandOverlay: Boolean(handOverlay),
-    });
-    // #endregion
     gestureSwitchQueue = gestureSwitchQueue
       .then(async () => {
         if (modeSwitchToken !== gestureInitToken) return;
@@ -1013,31 +955,8 @@ async function main(): Promise<void> {
         cleanupGestureResources(true);
         const success = await initHandGesture(targetMode);
         const isStaleSwitch = modeSwitchToken !== gestureInitToken || params.gestureMode !== targetMode;
-        // #region agent log
-        agentDebugLog('B', 'web/src/main.ts:gestureModeOnChange', 'Gesture init resolved', {
-          modeSwitchToken,
-          requestedMode: targetMode,
-          success,
-          paramsGestureMode: params.gestureMode,
-          isStaleSwitch,
-          previousGestureMode,
-          hasHandGestureController: Boolean(handGestureController),
-          hasServerGestureClient: Boolean(serverGestureClient),
-          handVideoConnected: Boolean(handVideo?.isConnected),
-          handCanvasConnected: Boolean(handCanvas?.isConnected),
-          handOverlayConnected: Boolean(handOverlay?.isConnected),
-        });
-        // #endregion
         if (isStaleSwitch) {
           cleanupGestureResources(true);
-          // #region agent log
-          agentDebugLog('B', 'web/src/main.ts:gestureModeOnChange', 'Mode changed during await, cleaned stale resources', {
-            modeSwitchToken,
-            requestedMode: targetMode,
-            paramsGestureMode: params.gestureMode,
-            previousGestureMode,
-          });
-          // #endregion
           return;
         }
 
@@ -1142,18 +1061,6 @@ async function main(): Promise<void> {
       pipeline;
     const n = params.bloomIterations;
     const aaMode = activeAntialiasMode;
-    if (aaMode === 'taa' && !taaBuffers && !aaMismatchLogged) {
-      // #region agent log
-      agentDebugLog('C', 'web/src/main.ts:frame', 'AA mode mismatch: params=taa but pipeline has no taaBuffers', {
-        aaMode,
-        hasTaaBuffers: Boolean(taaBuffers),
-        hasMainMsaa: Boolean(mainMsaa),
-      });
-      // #endregion
-      aaMismatchLogged = true;
-    } else if (aaMode !== 'taa' || taaBuffers) {
-      aaMismatchLogged = false;
-    }
 
     const sceneTargetFbo = mainMsaa ? mainMsaa.fbo : main.fbo;
     drawPass(gl, vao, passes.blackhole, sceneTargetFbo, rw, rh, time, () => {
