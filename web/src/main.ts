@@ -55,6 +55,32 @@ const LENS_MASS_REF = 10;
 type AntialiasMode = 'off' | 'fxaa' | 'taa';
 type GestureMode = 'off' | 'local' | 'server';
 
+function agentDebugLog(
+  hypothesisId: string,
+  location: string,
+  message: string,
+  data: Record<string, unknown>,
+): void {
+  const payload = { hypothesisId, location, message, data, timestamp: Date.now() };
+  try {
+    const bridge = (globalThis as { __agentDebugLog?: (entry: unknown) => void }).__agentDebugLog;
+    if (typeof bridge === 'function') {
+      bridge(payload);
+      return;
+    }
+    const req = (0, eval)('require') as ((name: string) => { appendFileSync: (path: string, line: string) => void });
+    req('fs').appendFileSync('/opt/cursor/logs/debug.log', `${JSON.stringify(payload)}\n`);
+  } catch {
+    console.debug('[agent-debug]', payload);
+  }
+}
+
+interface PipelineAllocResult {
+  pipeline: PipelineRTs;
+  format: ColorRTFormat;
+  effectiveAaMode: AntialiasMode;
+}
+
 function bodyKindShaderValue(k: BodyKind): number {
   if (k === 'blackHole') return 0;
   if (k === 'whiteHole') return 1;
@@ -199,16 +225,27 @@ function tryAllocPipeline(
   height: number,
   aaMode: AntialiasMode,
   msaaSamples: number,
-): { pipeline: PipelineRTs; format: ColorRTFormat } {
+): PipelineAllocResult {
+  // #region agent log
+  agentDebugLog('C', 'web/src/main.ts:tryAllocPipeline', 'tryAllocPipeline entry', { width, height, aaMode, msaaSamples });
+  // #endregion
   const preferred = detectRTFormat(gl);
   try {
-    return { pipeline: allocPipeline(gl, width, height, preferred, aaMode, msaaSamples), format: preferred };
+    return {
+      pipeline: allocPipeline(gl, width, height, preferred, aaMode, msaaSamples),
+      format: preferred,
+      effectiveAaMode: aaMode,
+    };
   } catch (e) {
     console.warn('[blackhole-web] Pipeline allocation failed, retrying with fallback:', e);
     // Fallback 1: try with rgba8 format
     if (preferred === 'float16') {
       try {
-        return { pipeline: allocPipeline(gl, width, height, 'rgba8', aaMode, msaaSamples), format: 'rgba8' };
+        return {
+          pipeline: allocPipeline(gl, width, height, 'rgba8', aaMode, msaaSamples),
+          format: 'rgba8',
+          effectiveAaMode: aaMode,
+        };
       } catch (e2) {
         console.warn('[blackhole-web] Pipeline allocation with rgba8 also failed:', e2);
       }
@@ -223,7 +260,7 @@ function tryAllocPipeline(
         try {
           console.warn('[blackhole-web] Retrying TAA with reduced MSAA samples');
           const p = allocPipeline(gl, width, height, 'rgba8', 'taa', 1);
-          return { pipeline: p, format: 'rgba8' };
+          return { pipeline: p, format: 'rgba8', effectiveAaMode: 'taa' };
         } catch (e3) {
           console.warn('[blackhole-web] TAA with 1 sample also failed:', e3);
         }
@@ -233,7 +270,14 @@ function tryAllocPipeline(
       // Fallback 3: try FXAA as last resort for antialiasing
       try {
         console.warn('[blackhole-web] Trying FXAA as final fallback');
-        return { pipeline: allocPipeline(gl, width, height, 'rgba8', 'fxaa', 0), format: 'rgba8' };
+        // #region agent log
+        agentDebugLog('C', 'web/src/main.ts:tryAllocPipeline', 'Fallback selected FXAA', { preferred, aaMode, msaaSamples });
+        // #endregion
+        return {
+          pipeline: allocPipeline(gl, width, height, 'rgba8', 'fxaa', 0),
+          format: 'rgba8',
+          effectiveAaMode: 'fxaa',
+        };
       } catch (e4) {
         console.warn('[blackhole-web] FXAA also failed:', e4);
       }
@@ -241,12 +285,20 @@ function tryAllocPipeline(
     // If we get here with TAA mode, try FXAA or off as last resort
     if (aaMode === 'taa') {
       try {
-        return { pipeline: allocPipeline(gl, width, height, 'rgba8', 'fxaa', 0), format: 'rgba8' };
+        return {
+          pipeline: allocPipeline(gl, width, height, 'rgba8', 'fxaa', 0),
+          format: 'rgba8',
+          effectiveAaMode: 'fxaa',
+        };
       } catch (e5) {
         console.warn('[blackhole-web] FXAA also failed:', e5);
       }
       try {
-        return { pipeline: allocPipeline(gl, width, height, 'rgba8', 'off', 0), format: 'rgba8' };
+        return {
+          pipeline: allocPipeline(gl, width, height, 'rgba8', 'off', 0),
+          format: 'rgba8',
+          effectiveAaMode: 'off',
+        };
       } catch (e6) {
         console.error('[blackhole-web] All fallbacks exhausted:', e6);
       }
@@ -486,10 +538,34 @@ async function main(): Promise<void> {
   let handCanvas: HTMLCanvasElement | null = null;
   let handOverlay: HTMLDivElement | null = null;
   let previousGestureMode: 'off' | 'local' | 'server' = 'off';
+  let gestureInitToken = 0;
+  let gestureSwitchQueue: Promise<void> = Promise.resolve();
   let handX = 0.5;
   let handY = 0.5;
 
-  async function initHandGesture(): Promise<boolean> {
+  function cleanupGestureResources(removeDom = true): void {
+    if (handGestureController) {
+      handGestureController.destroy();
+      handGestureController = null;
+    }
+    if (serverGestureClient) {
+      serverGestureClient.destroy();
+      serverGestureClient = null;
+    }
+    if (removeDom) {
+      const v = handVideo;
+      const c = handCanvas;
+      const o = handOverlay;
+      handVideo = null;
+      handCanvas = null;
+      handOverlay = null;
+      v?.remove();
+      c?.remove();
+      o?.remove();
+    }
+  }
+
+  async function initHandGesture(targetMode: Exclude<GestureMode, 'off'>): Promise<boolean> {
     try {
       handVideo = document.createElement('video');
       handVideo.style.cssText = 'position:fixed;bottom:10px;left:10px;width:160px;height:120px;border:2px solid #00ff00;border-radius:8px;opacity:0.8;z-index:1000;transform:scaleX(-1);';
@@ -504,7 +580,7 @@ async function main(): Promise<void> {
 
       handOverlay = document.createElement('div');
       handOverlay.style.cssText = 'position:fixed;bottom:260px;left:10px;padding:8px 12px;background:rgba(0,0,0,0.7);color:#00ff00;border-radius:4px;font-size:12px;font-family:monospace;z-index:1000;';
-      handOverlay.textContent = `手势: 正在初始化 (${params.gestureMode === 'server' ? '服务器模式' : '本地模式'})...`;
+      handOverlay.textContent = `手势: 正在初始化 (${targetMode === 'server' ? '服务器模式' : '本地模式'})...`;
 
       document.body.appendChild(handVideo);
       document.body.appendChild(handCanvas);
@@ -513,7 +589,7 @@ async function main(): Promise<void> {
       // 等待DOM完全渲染
       await new Promise(resolve => setTimeout(resolve, 100));
 
-      if (params.gestureMode === 'server') {
+      if (targetMode === 'server') {
         return await initServerGesture();
       } else {
         return await initLocalGesture();
@@ -524,14 +600,7 @@ async function main(): Promise<void> {
         handOverlay.style.color = '#ff4444';
       }
       console.error('[blackhole-web] 手势控制初始化错误:', error);
-      if (serverGestureClient) {
-        serverGestureClient.destroy();
-        serverGestureClient = null;
-      }
-      if (handGestureController) {
-        handGestureController.destroy();
-        handGestureController = null;
-      }
+      cleanupGestureResources(false);
       return false;
     }
   }
@@ -569,16 +638,16 @@ async function main(): Promise<void> {
   }
 
   async function initServerGesture(): Promise<boolean> {
-    // 通过 nginx 代理连接服务器（Docker 环境中）
-    // HTTP 代理: localhost:8080, HTTPS 代理: localhost:8443
-    const isHTTPS = window.location.protocol === 'https:';
     console.log('[ServerGesture] window.location.protocol:', window.location.protocol);
-    console.log('[ServerGesture] isHTTPS:', isHTTPS);
-    serverGestureClient = new ServerGestureClient({
-      host: 'localhost',
-      port: isHTTPS ? 8443 : 8080,
-      useSSL: isHTTPS,
+    // #region agent log
+    agentDebugLog('A', 'web/src/main.ts:initServerGesture', 'Server gesture target resolved', {
+      protocol: window.location.protocol,
+      hostname: window.location.hostname,
+      configuredHost: '<relative>',
+      configuredPort: '<relative>',
     });
+    // #endregion
+    serverGestureClient = new ServerGestureClient();
 
     const success = await serverGestureClient.initialize(handVideo!, handCanvas!);
 
@@ -608,6 +677,7 @@ async function main(): Promise<void> {
       }
       console.error('[blackhole-web] 服务器端手势控制初始化失败');
       serverGestureClient.destroy();
+      serverGestureClient = null;
       return false;
     }
   }
@@ -660,6 +730,8 @@ async function main(): Promise<void> {
   let rtFormat: ColorRTFormat = 'rgba8';
   let lastMsaaSamples = params.msaaSamples;
   let lastAntialiasMode: AntialiasMode = params.antialias;
+  let activeAntialiasMode: AntialiasMode = params.antialias;
+  let aaMismatchLogged = false;
   let firstFrame = true;
   let taaIdx = 0;
   let rebuildScheduled = false;
@@ -705,6 +777,17 @@ async function main(): Promise<void> {
     const r = tryAllocPipeline(gl, w, h, params.antialias, params.msaaSamples);
     pipeline = r.pipeline;
     rtFormat = r.format;
+    activeAntialiasMode = r.effectiveAaMode;
+    // #region agent log
+    agentDebugLog('C', 'web/src/main.ts:resizeNow', 'Pipeline rebuilt', {
+      requestedAntialias: params.antialias,
+      effectiveAntialias: activeAntialiasMode,
+      requestedMsaaSamples: params.msaaSamples,
+      hasTaaBuffers: Boolean(pipeline.taaBuffers),
+      hasMainMsaa: Boolean(pipeline.mainMsaa),
+      rtFormat,
+    });
+    // #endregion
     resetTaaHistory();
     resizeTrailCanvas();
     if (rtFormat === 'rgba8') {
@@ -900,80 +983,80 @@ async function main(): Promise<void> {
     '关闭': 'off',
     '本地计算': 'local',
     '服务器计算': 'server',
-  }).name('手势识别').onChange(async (mode: 'off' | 'local' | 'server') => {
-    if (mode === previousGestureMode && mode !== 'off') return;
+  }).name('手势识别').onChange((mode: 'off' | 'local' | 'server') => {
+    const modeSwitchToken = ++gestureInitToken;
+    // #region agent log
+    agentDebugLog('B', 'web/src/main.ts:gestureModeOnChange', 'Gesture mode change requested', {
+      modeSwitchToken,
+      requestedMode: mode,
+      previousGestureMode,
+      paramsGestureMode: params.gestureMode,
+      hasHandGestureController: Boolean(handGestureController),
+      hasServerGestureClient: Boolean(serverGestureClient),
+      hasHandVideo: Boolean(handVideo),
+      hasHandCanvas: Boolean(handCanvas),
+      hasHandOverlay: Boolean(handOverlay),
+    });
+    // #endregion
+    gestureSwitchQueue = gestureSwitchQueue
+      .then(async () => {
+        if (modeSwitchToken !== gestureInitToken) return;
+        const targetMode = params.gestureMode;
+        if (targetMode === previousGestureMode && targetMode !== 'off') return;
 
-    if (mode === 'off') {
-      // Clean up all gesture resources
-      if (handGestureController) {
-        handGestureController.destroy();
-        handGestureController = null;
-      }
-      if (serverGestureClient) {
-        serverGestureClient.destroy();
-        serverGestureClient = null;
-      }
-      // Save DOM refs before nulling them, then remove from DOM
-      const v = handVideo;
-      const c = handCanvas;
-      const o = handOverlay;
-      handVideo = null;
-      handCanvas = null;
-      handOverlay = null;
-      v?.remove();
-      c?.remove();
-      o?.remove();
-      previousGestureMode = 'off';
-      return;
-    }
+        if (targetMode === 'off') {
+          cleanupGestureResources(true);
+          previousGestureMode = 'off';
+          return;
+        }
 
-    // Switching to a different mode (local or server)
-    const prevMode = previousGestureMode;
-    if (prevMode !== 'off') {
-      // Clean up previous mode resources
-      if (handGestureController) {
-        handGestureController.destroy();
-        handGestureController = null;
-      }
-      if (serverGestureClient) {
-        serverGestureClient.destroy();
-        serverGestureClient = null;
-      }
-      // Save DOM refs before nulling them, then remove from DOM
-      const v = handVideo;
-      const c = handCanvas;
-      const o = handOverlay;
-      handVideo = null;
-      handCanvas = null;
-      handOverlay = null;
-      v?.remove();
-      c?.remove();
-      o?.remove();
-    }
+        cleanupGestureResources(true);
+        const success = await initHandGesture(targetMode);
+        const isStaleSwitch = modeSwitchToken !== gestureInitToken || params.gestureMode !== targetMode;
+        // #region agent log
+        agentDebugLog('B', 'web/src/main.ts:gestureModeOnChange', 'Gesture init resolved', {
+          modeSwitchToken,
+          requestedMode: targetMode,
+          success,
+          paramsGestureMode: params.gestureMode,
+          isStaleSwitch,
+          previousGestureMode,
+          hasHandGestureController: Boolean(handGestureController),
+          hasServerGestureClient: Boolean(serverGestureClient),
+          handVideoConnected: Boolean(handVideo?.isConnected),
+          handCanvasConnected: Boolean(handCanvas?.isConnected),
+          handOverlayConnected: Boolean(handOverlay?.isConnected),
+        });
+        // #endregion
+        if (isStaleSwitch) {
+          cleanupGestureResources(true);
+          // #region agent log
+          agentDebugLog('B', 'web/src/main.ts:gestureModeOnChange', 'Mode changed during await, cleaned stale resources', {
+            modeSwitchToken,
+            requestedMode: targetMode,
+            paramsGestureMode: params.gestureMode,
+            previousGestureMode,
+          });
+          // #endregion
+          return;
+        }
 
-    // Initialize the new mode
-    const success = await initHandGesture();
-    if (!success) {
-      // Don't remove DOM elements here - keep error message visible so user can see it
-      // Don't null handVideo/handCanvas/handOverlay so "off" cleanup can still remove them
-      handGestureController = null;
-      if (serverGestureClient) {
-        serverGestureClient.destroy();
-        serverGestureClient = null;
-      }
-      return;
-    }
+        if (!success) {
+          cleanupGestureResources(true);
+          previousGestureMode = 'off';
+          return;
+        }
 
-    // If mode changed while awaiting, abort
-    if (params.gestureMode !== mode) return;
-
-    previousGestureMode = mode;
-
-    if (mode === 'server' && serverGestureClient) {
-      serverGestureClient.enable();
-    } else if (mode === 'local' && handGestureController) {
-      handGestureController.setEnabled(true);
-    }
+        previousGestureMode = targetMode;
+        if (targetMode === 'server' && serverGestureClient) {
+          serverGestureClient.enable();
+        } else if (targetMode === 'local' && handGestureController) {
+          handGestureController.setEnabled(true);
+        }
+      })
+      .catch((error) => {
+        console.error('[blackhole-web] 手势模式切换错误:', error);
+      });
   });
   gui.add(params, 'cameraRoll', -180, 180);
   gui.add(params, 'frontView');
@@ -1058,7 +1141,19 @@ async function main(): Promise<void> {
     const { width: rw, height: rh, main, mainMsaa, mainResolved, brightness, down, up, bloomFinal, taaBuffers, tonemapped, output } =
       pipeline;
     const n = params.bloomIterations;
-    const aaMode = params.antialias;
+    const aaMode = activeAntialiasMode;
+    if (aaMode === 'taa' && !taaBuffers && !aaMismatchLogged) {
+      // #region agent log
+      agentDebugLog('C', 'web/src/main.ts:frame', 'AA mode mismatch: params=taa but pipeline has no taaBuffers', {
+        aaMode,
+        hasTaaBuffers: Boolean(taaBuffers),
+        hasMainMsaa: Boolean(mainMsaa),
+      });
+      // #endregion
+      aaMismatchLogged = true;
+    } else if (aaMode !== 'taa' || taaBuffers) {
+      aaMismatchLogged = false;
+    }
 
     const sceneTargetFbo = mainMsaa ? mainMsaa.fbo : main.fbo;
     drawPass(gl, vao, passes.blackhole, sceneTargetFbo, rw, rh, time, () => {
