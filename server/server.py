@@ -419,7 +419,11 @@ def handle_unsubscribe(data):
 def initialize_detector():
     """初始化手势检测器"""
     global gesture_detector
-    gesture_detector = GestureDetector()
+    try:
+        gesture_detector = GestureDetector()
+    except Exception as exc:
+        logger.error("手势检测器初始化失败，服务将以降级模式启动: %s", exc)
+        gesture_detector = None
 
 def print_stats():
     """打印服务器统计信息"""

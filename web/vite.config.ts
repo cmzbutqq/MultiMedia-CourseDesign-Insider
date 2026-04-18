@@ -9,6 +9,8 @@ export default defineConfig({
   // Use repo-based base path in GitHub Actions for Pages.
   base: process.env.GITHUB_ACTIONS === 'true' ? pagesBase : '/',
   server: {
+    host: '0.0.0.0',
+    port: 5174,
     strictPort: false,
     https: (() => {
       const keyPath = resolve(__dirname, 'localhost-key.pem');
