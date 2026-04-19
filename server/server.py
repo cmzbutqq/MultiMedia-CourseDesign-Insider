@@ -300,10 +300,13 @@ clients: Dict[str, Any] = {}
 @app.route('/health')
 def health():
     """健康检查端点"""
+    detector_ready = bool(gesture_detector and getattr(gesture_detector, 'initialized', False))
+    status_code = 200 if detector_ready else 503
+    status = 'healthy' if detector_ready else 'unhealthy'
     return jsonify({
-        'status': 'healthy',
-        'gesture_detector_initialized': gesture_detector.initialized if gesture_detector else False
-    })
+        'status': status,
+        'gesture_detector_initialized': detector_ready
+    }), status_code
 
 @app.route('/api/detect', methods=['POST'])
 def detect_hand():
