@@ -1,3 +1,7 @@
+export const MSAASAMPLES = 4;
+
+export type AntialiasMode = 'off' | 'fxaa' | 'taa';
+
 export function compileProgram(
   gl: WebGL2RenderingContext,
   vertSrc: string,
@@ -104,6 +108,105 @@ export function createColorRT(
 export function destroyColorRT(gl: WebGL2RenderingContext, rt: ColorRT): void {
   gl.deleteFramebuffer(rt.fbo);
   gl.deleteTexture(rt.texture);
+}
+
+export interface MSAART {
+  texture: WebGLTexture;
+  fbo: WebGLFramebuffer;
+}
+
+// Cache whether texImage2DMultisample is available - only warn once
+let _msaaSupported: boolean | null = null;
+
+export function createMSAART(
+  gl: WebGL2RenderingContext,
+  width: number,
+  height: number,
+  _format: ColorRTFormat,
+  samples: number,
+): MSAART | null {
+  // Check texImage2DMultisample availability first - only warn once
+  if (_msaaSupported === null) {
+    const texFn = (gl as unknown as { texImage2DMultisample?: Function }).texImage2DMultisample;
+    _msaaSupported = typeof texFn === 'function';
+    if (!_msaaSupported) {
+      console.warn('[gl] texImage2DMultisample not available - MSAA disabled');
+    }
+  }
+  if (!_msaaSupported) {
+    return null;
+  }
+
+  // Guard: check WebGL2 context capabilities
+  const maxSamples = gl.getParameter(gl.MAX_SAMPLES);
+  if (!maxSamples) {
+    return null;
+  }
+  const actualSamples = Math.max(1, Math.min(samples, maxSamples));
+  if (actualSamples <= 1) {
+    return null;
+  }
+  if (actualSamples < samples) {
+    console.warn(`[gl] MSAA requested ${samples}x but limited to ${actualSamples}x (MAX_SAMPLES=${maxSamples})`);
+  }
+
+  const texFn = (gl as unknown as { texImage2DMultisample: Function }).texImage2DMultisample;
+
+  // Now allocate resources with full error recovery
+  const texture = gl.createTexture()!;
+  const fbo = gl.createFramebuffer()!;
+
+  // Unbind any previously bound textures on all targets to avoid state pollution
+  gl.bindTexture(gl.TEXTURE_2D, null);
+  gl.bindTexture(gl.TEXTURE_CUBE_MAP, null);
+  gl.bindTexture(gl.TEXTURE_2D_MULTISAMPLE, texture);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+
+  texFn.call(gl, gl.TEXTURE_2D_MULTISAMPLE, actualSamples, gl.RGBA8, width, height, true);
+
+  gl.framebufferTexture2D(
+    gl.DRAW_FRAMEBUFFER,
+    gl.COLOR_ATTACHMENT0,
+    gl.TEXTURE_2D_MULTISAMPLE,
+    texture,
+    0,
+  );
+  const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.bindTexture(gl.TEXTURE_2D_MULTISAMPLE, null);
+
+  if (status !== gl.FRAMEBUFFER_COMPLETE) {
+    gl.deleteFramebuffer(fbo);
+    gl.deleteTexture(texture);
+    console.warn('[gl] MSAA FBO incomplete (status=' + status + ')');
+    return null;
+  }
+
+  return { texture, fbo };
+}
+
+export function destroyMSAART(gl: WebGL2RenderingContext, rt: MSAART): void {
+  gl.deleteFramebuffer(rt.fbo);
+  gl.deleteTexture(rt.texture);
+}
+
+export function resolveMSAA(
+  gl: WebGL2RenderingContext,
+  msaa: MSAART,
+  target: ColorRT,
+  width: number,
+  height: number,
+): void {
+  gl.bindFramebuffer(gl.READ_FRAMEBUFFER, msaa.fbo);
+  gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, target.fbo);
+  gl.blitFramebuffer(
+    0, 0, width, height,
+    0, 0, width, height,
+    gl.COLOR_BUFFER_BIT,
+    gl.LINEAR,
+  );
+  gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+  gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
 }
 
 export function createQuadVAO(gl: WebGL2RenderingContext): WebGLVertexArrayObject {

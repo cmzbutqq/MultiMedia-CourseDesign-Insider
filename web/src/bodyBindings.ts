@@ -1,4 +1,4 @@
-import type { SceneBody, SceneState } from './scene.js';
+import type { SceneState } from './scene.js';
 
 /** lil-gui 可绑定的位置/速度代理（避免直接编辑 tuple） */
 export function positionRef(scene: SceneState, index: number) {
