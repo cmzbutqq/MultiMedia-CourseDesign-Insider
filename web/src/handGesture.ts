@@ -28,7 +28,6 @@ export class HandGestureController {
   private canvasCtx: CanvasRenderingContext2D | null = null;
   private callbacks: GestureCallback[] = [];
   private enabled: boolean = false;
-  private isInitialized: boolean = false;
   private wasHandDetected: boolean = false;
   private lastResults: Results | null = null;
 
@@ -39,7 +38,6 @@ export class HandGestureController {
   private lastEmitX: number = 0.5;
   private lastEmitY: number = 0.5;
   private emitThreshold: number = 0.005;
-  private lastEmitTime: number = 0;
 
   private gestureState: GestureState = {
     palmX: 0.5,
@@ -149,7 +147,6 @@ export class HandGestureController {
         return false;
       }
 
-      this.isInitialized = true;
       console.log('[HandGesture] 摄像头初始化成功');
       console.log('[HandGesture] 手势控制初始化成功');
       return true;
@@ -373,7 +370,6 @@ export class HandGestureController {
     this.resetGestureState();
     this.wasHandDetected = false;
     this.callbacks = [];
-    this.isInitialized = false;
     console.log('[HandGesture] 已销毁');
   }
 

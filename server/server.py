@@ -24,6 +24,7 @@ from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
 from flask import Flask, request, jsonify
+from werkzeug.exceptions import BadRequest
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit, join_room, leave_room
 
@@ -333,6 +334,8 @@ def detect_hand():
 
         return jsonify(result)
 
+    except BadRequest:
+        return jsonify({'error': '请求体不是合法 JSON'}), 400
     except Exception as e:
         logger.error(f"API 处理错误: {e}")
         return jsonify({'error': str(e)}), 500

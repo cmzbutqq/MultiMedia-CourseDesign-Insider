@@ -85,6 +85,20 @@ class HealthEndpointTests(unittest.TestCase):
             {"status": "unhealthy", "gesture_detector_initialized": False},
         )
 
+    def test_detect_returns_400_for_invalid_json_payload(self):
+        module = _load_server_module()
+        module.gesture_detector = None
+
+        client = module.app.test_client()
+        response = client.post(
+            "/api/detect",
+            data="{bad-json",
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("error", response.get_json())
+
 
 if __name__ == "__main__":
     unittest.main()

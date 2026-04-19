@@ -10,13 +10,11 @@ import {
   destroyMSAART,
   detectRTFormat,
   resolveMSAA,
-  MSAASAMPLES,
   type MSAART,
 } from './gl.js';
 import { loadCubemap, loadTexture2D } from './resources.js';
 import {
   HandGestureController,
-  type GestureEvent,
 } from './handGesture.js';
 import { ServerGestureClient } from './serverGestureClient.js';
 import {
@@ -514,8 +512,6 @@ async function main(): Promise<void> {
   let previousGestureMode: 'off' | 'local' | 'server' = 'off';
   let gestureInitToken = 0;
   let gestureSwitchQueue: Promise<void> = Promise.resolve();
-  let handX = 0.5;
-  let handY = 0.5;
 
   function cleanupGestureResources(removeDom = true): void {
     if (handGestureController) {
@@ -700,7 +696,12 @@ async function main(): Promise<void> {
   let firstFrame = true;
   let taaIdx = 0;
   let rebuildScheduled = false;
-  let pendingResizeSource: 'resize-observer' | 'gui-antialias' | 'gui-msaa' | null = 'startup';
+  let pendingResizeSource:
+    | 'resize-observer'
+    | 'gui-antialias'
+    | 'gui-msaa'
+    | 'startup'
+    | null = 'startup';
 
   function resetTaaHistory(): void {
     firstFrame = true;
@@ -938,7 +939,7 @@ async function main(): Promise<void> {
     '关闭': 'off',
     '本地计算': 'local',
     '服务器计算': 'server',
-  }).name('手势识别').onChange((mode: 'off' | 'local' | 'server') => {
+  }).name('手势识别').onChange(() => {
     const modeSwitchToken = ++gestureInitToken;
     gestureSwitchQueue = gestureSwitchQueue
       .then(async () => {
