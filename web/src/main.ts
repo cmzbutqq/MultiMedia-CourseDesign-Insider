@@ -338,6 +338,22 @@ interface Pass {
   uniforms: UniformMap;
 }
 
+interface AgentDebugLogEntry {
+  hypothesisId: string;
+  location: string;
+  message: string;
+  data: Record<string, unknown>;
+  timestamp: number;
+}
+
+function emitAgentDebugLog(entry: Omit<AgentDebugLogEntry, 'timestamp'>): void {
+  const payload: AgentDebugLogEntry = { ...entry, timestamp: Date.now() };
+  const sink = (window as Window & { __agentDebugLog?: (line: AgentDebugLogEntry) => void }).__agentDebugLog;
+  if (typeof sink === 'function') {
+    sink(payload);
+  }
+}
+
 function makePass(
   gl: WebGL2RenderingContext,
   vert: string,
@@ -516,6 +532,10 @@ async function main(): Promise<void> {
   let gestureSwitchQueue: Promise<void> = Promise.resolve();
   let handX = 0.5;
   let handY = 0.5;
+  const debugParams = new URLSearchParams(window.location.search);
+  const debugSlowGestureMs = Math.max(0, Number(debugParams.get('agent_slow_hand_ms') ?? '0') || 0);
+  let frameInFlight = 0;
+  let frameSeq = 0;
 
   function cleanupGestureResources(removeDom = true): void {
     if (handGestureController) {
@@ -665,6 +685,31 @@ async function main(): Promise<void> {
   const frameInterval = 100;
 
   async function updateHandGesture(): Promise<void> {
+    // #region agent log
+    emitAgentDebugLog({
+      hypothesisId: 'H2',
+      location: 'web/src/main.ts:updateHandGesture:entry',
+      message: 'updateHandGesture entry',
+      data: {
+        gestureMode: params.gestureMode,
+        hasController: !!handGestureController,
+        debugSlowGestureMs,
+      },
+    });
+    // #endregion
+
+    if (debugSlowGestureMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, debugSlowGestureMs));
+      // #region agent log
+      emitAgentDebugLog({
+        hypothesisId: 'H2',
+        location: 'web/src/main.ts:updateHandGesture:after-debug-delay',
+        message: 'Applied artificial gesture delay',
+        data: { debugSlowGestureMs },
+      });
+      // #endregion
+    }
+
     if (params.gestureMode === 'off') return;
 
     if (params.gestureMode === 'server') {
@@ -680,6 +725,14 @@ async function main(): Promise<void> {
     try {
       await handGestureController.processFrame();
     } catch (err) {
+      // #region agent log
+      emitAgentDebugLog({
+        hypothesisId: 'H4',
+        location: 'web/src/main.ts:updateHandGesture:processFrame-error',
+        message: 'processFrame threw error',
+        data: { err: err instanceof Error ? err.message : String(err) },
+      });
+      // #endregion
       return;
     }
 
@@ -1042,57 +1095,97 @@ async function main(): Promise<void> {
   }
 
   async function frame(now: number): Promise<void> {
-    requestAnimationFrame(frame);
-    const time = now / 1000;
-    if (!pipeline) return;
-
-    await updateHandGesture();
-
-    stepScene(scene);
-
-    if (scene.showTrails) {
-      for (let bi = 0; bi < scene.bodyCount; bi++) {
-        const b = scene.bodies[bi]!;
-        trails.push(bi, b.position[0], b.position[1], b.position[2]);
-      }
-    }
-
-    const { width: rw, height: rh, main, mainMsaa, mainResolved, brightness, down, up, bloomFinal, taaBuffers, tonemapped, output } =
-      pipeline;
-    const n = params.bloomIterations;
-    const aaMode = activeAntialiasMode;
-
-    const sceneTargetFbo = mainMsaa ? mainMsaa.fbo : main.fbo;
-    drawPass(gl, vao, passes.blackhole, sceneTargetFbo, rw, rh, time, () => {
-      const p = passes.blackhole;
-      setF(gl, p.program, p.uniforms, 'mouseX', mouseX);
-      setF(gl, p.program, p.uniforms, 'mouseY', mouseY);
-      setI1(gl, p.program, p.uniforms, 'colorMap', 0);
-      setI1(gl, p.program, p.uniforms, 'galaxy', 1);
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, colorMap);
-      gl.activeTexture(gl.TEXTURE1);
-      gl.bindTexture(gl.TEXTURE_CUBE_MAP, galaxy);
-
-      setF(gl, p.program, p.uniforms, 'fovScale', 1);
-      setF(gl, p.program, p.uniforms, 'gravatationalLensing', params.gravatationalLensing ? 1 : 0);
-      setF(gl, p.program, p.uniforms, 'renderBlackHole', params.renderBlackHole ? 1 : 0);
-      setF(gl, p.program, p.uniforms, 'mouseControl', params.mouseControl ? 1 : 0);
-      setF(gl, p.program, p.uniforms, 'cameraRoll', params.cameraRoll);
-      setF(gl, p.program, p.uniforms, 'frontView', params.frontView ? 1 : 0);
-      setF(gl, p.program, p.uniforms, 'topView', params.topView ? 1 : 0);
-      setF(gl, p.program, p.uniforms, 'adiskEnabled', params.adiskEnabled ? 1 : 0);
-      setF(gl, p.program, p.uniforms, 'adiskParticle', params.adiskParticle ? 1 : 0);
-      setF(gl, p.program, p.uniforms, 'adiskDensityV', params.adiskDensityV);
-      setF(gl, p.program, p.uniforms, 'adiskDensityH', params.adiskDensityH);
-      setF(gl, p.program, p.uniforms, 'adiskHeight', params.adiskHeight);
-      setF(gl, p.program, p.uniforms, 'adiskLit', params.adiskLit);
-      setF(gl, p.program, p.uniforms, 'adiskNoiseLOD', params.adiskNoiseLOD);
-      setF(gl, p.program, p.uniforms, 'adiskNoiseScale', params.adiskNoiseScale);
-      setF(gl, p.program, p.uniforms, 'adiskSpeed', params.adiskSpeed);
-
-      bindSceneUniforms(gl, p, scene);
+    const frameId = ++frameSeq;
+    const inFlightBefore = frameInFlight;
+    // #region agent log
+    emitAgentDebugLog({
+      hypothesisId: 'H1',
+      location: 'web/src/main.ts:frame:entry',
+      message: 'frame entry',
+      data: {
+        frameId,
+        inFlightBefore,
+        now,
+      },
     });
+    // #endregion
+    frameInFlight++;
+    if (inFlightBefore > 0) {
+      // #region agent log
+      emitAgentDebugLog({
+        hypothesisId: 'H1',
+        location: 'web/src/main.ts:frame:reentry-detected',
+        message: 'frame reentry detected',
+        data: {
+          frameId,
+          inFlightBefore,
+        },
+      });
+      // #endregion
+    }
+    const handAwaitStart = performance.now();
+    try {
+      const time = now / 1000;
+      if (!pipeline) return;
+
+      await updateHandGesture();
+      // #region agent log
+      emitAgentDebugLog({
+        hypothesisId: 'H2',
+        location: 'web/src/main.ts:frame:after-updateHandGesture',
+        message: 'await updateHandGesture completed',
+        data: {
+          frameId,
+          handAwaitMs: performance.now() - handAwaitStart,
+        },
+      });
+      // #endregion
+
+      stepScene(scene);
+
+      if (scene.showTrails) {
+        for (let bi = 0; bi < scene.bodyCount; bi++) {
+          const b = scene.bodies[bi]!;
+          trails.push(bi, b.position[0], b.position[1], b.position[2]);
+        }
+      }
+
+      const { width: rw, height: rh, main, mainMsaa, mainResolved, brightness, down, up, bloomFinal, taaBuffers, tonemapped, output } =
+        pipeline;
+      const n = params.bloomIterations;
+      const aaMode = activeAntialiasMode;
+
+      const sceneTargetFbo = mainMsaa ? mainMsaa.fbo : main.fbo;
+      drawPass(gl, vao, passes.blackhole, sceneTargetFbo, rw, rh, time, () => {
+        const p = passes.blackhole;
+        setF(gl, p.program, p.uniforms, 'mouseX', mouseX);
+        setF(gl, p.program, p.uniforms, 'mouseY', mouseY);
+        setI1(gl, p.program, p.uniforms, 'colorMap', 0);
+        setI1(gl, p.program, p.uniforms, 'galaxy', 1);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, colorMap);
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_CUBE_MAP, galaxy);
+
+        setF(gl, p.program, p.uniforms, 'fovScale', 1);
+        setF(gl, p.program, p.uniforms, 'gravatationalLensing', params.gravatationalLensing ? 1 : 0);
+        setF(gl, p.program, p.uniforms, 'renderBlackHole', params.renderBlackHole ? 1 : 0);
+        setF(gl, p.program, p.uniforms, 'mouseControl', params.mouseControl ? 1 : 0);
+        setF(gl, p.program, p.uniforms, 'cameraRoll', params.cameraRoll);
+        setF(gl, p.program, p.uniforms, 'frontView', params.frontView ? 1 : 0);
+        setF(gl, p.program, p.uniforms, 'topView', params.topView ? 1 : 0);
+        setF(gl, p.program, p.uniforms, 'adiskEnabled', params.adiskEnabled ? 1 : 0);
+        setF(gl, p.program, p.uniforms, 'adiskParticle', params.adiskParticle ? 1 : 0);
+        setF(gl, p.program, p.uniforms, 'adiskDensityV', params.adiskDensityV);
+        setF(gl, p.program, p.uniforms, 'adiskDensityH', params.adiskDensityH);
+        setF(gl, p.program, p.uniforms, 'adiskHeight', params.adiskHeight);
+        setF(gl, p.program, p.uniforms, 'adiskLit', params.adiskLit);
+        setF(gl, p.program, p.uniforms, 'adiskNoiseLOD', params.adiskNoiseLOD);
+        setF(gl, p.program, p.uniforms, 'adiskNoiseScale', params.adiskNoiseScale);
+        setF(gl, p.program, p.uniforms, 'adiskSpeed', params.adiskSpeed);
+
+        bindSceneUniforms(gl, p, scene);
+      });
 
     let sceneTex = (() => {
       if (mainMsaa && mainResolved) {
@@ -1213,8 +1306,34 @@ async function main(): Promise<void> {
       gl.bindTexture(gl.TEXTURE_2D, output.texture);
     });
 
-    drawTrails(time);
-    firstFrame = false;
+      drawTrails(time);
+      firstFrame = false;
+    } finally {
+      requestAnimationFrame(frame);
+      // #region agent log
+      emitAgentDebugLog({
+        hypothesisId: 'H1',
+        location: 'web/src/main.ts:frame:scheduled-next',
+        message: 'requestAnimationFrame queued before await',
+        data: {
+          frameId,
+          inFlightAfterSchedule: frameInFlight,
+        },
+      });
+      // #endregion
+      frameInFlight = Math.max(0, frameInFlight - 1);
+      // #region agent log
+      emitAgentDebugLog({
+        hypothesisId: 'H1',
+        location: 'web/src/main.ts:frame:exit',
+        message: 'frame exit',
+        data: {
+          frameId,
+          inFlightAfter: frameInFlight,
+        },
+      });
+      // #endregion
+    }
   }
 
   requestAnimationFrame(frame);
