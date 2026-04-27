@@ -40,6 +40,12 @@ export function createDefaultScene(): SceneState {
     softening: 0.15,
     dt: 0.02,
     showTrails: false,
+    timeWarp: {
+      enabled: false,
+      intensity: 0.5,
+      potentialScale: 1.0,
+      distanceScale: 5.0,
+    },
   };
 }
 

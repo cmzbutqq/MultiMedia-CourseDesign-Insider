@@ -16,7 +16,7 @@ import {
   applySceneState,
   cloneSceneState,
 } from './scene.js';
-import { stepScene } from './physics.js';
+import { stepScene, calculateTimeWarp } from './physics.js';
 import { createDefaultScene, SCENE_PRESETS } from './scenePresets.js';
 import { getCameraLookBasis, worldToScreenPx } from './camera.js';
 import { TrailBuffer, TRAIL_COLORS } from './trails.js';
@@ -314,6 +314,10 @@ function syncUiSceneFromScene(
     softening: number;
     dt: number;
     showTrails: boolean;
+    timeWarpEnabled: boolean;
+    timeWarpIntensity: number;
+    timeWarpPotentialScale: number;
+    timeWarpDistanceScale: number;
   },
   scene: SceneState,
 ): void {
@@ -324,6 +328,10 @@ function syncUiSceneFromScene(
   uiScene.softening = scene.softening;
   uiScene.dt = scene.dt;
   uiScene.showTrails = scene.showTrails;
+  uiScene.timeWarpEnabled = scene.timeWarp.enabled;
+  uiScene.timeWarpIntensity = scene.timeWarp.intensity;
+  uiScene.timeWarpPotentialScale = scene.timeWarp.potentialScale;
+  uiScene.timeWarpDistanceScale = scene.timeWarp.distanceScale;
 }
 
 async function main(): Promise<void> {
@@ -436,6 +444,11 @@ async function main(): Promise<void> {
     dt: scene.dt,
     showTrails: scene.showTrails,
     presetName: '单天体' as keyof typeof SCENE_PRESETS,
+    // 时间缩放参数
+    timeWarpEnabled: scene.timeWarp.enabled,
+    timeWarpIntensity: scene.timeWarp.intensity,
+    timeWarpPotentialScale: scene.timeWarp.potentialScale,
+    timeWarpDistanceScale: scene.timeWarp.distanceScale,
   };
 
   const sceneFolder = gui.addFolder('场景');
@@ -482,6 +495,33 @@ async function main(): Promise<void> {
     .name('轨迹')
     .onChange((v: boolean) => {
       scene.showTrails = v;
+    });
+
+  // 局部时间缩放控制
+  const timeWarpFolder = sceneFolder.addFolder('时间缩放(仿真效果)');
+  timeWarpFolder
+    .add(uiScene, 'timeWarpEnabled')
+    .name('启用')
+    .onChange((v: boolean) => {
+      scene.timeWarp.enabled = v;
+    });
+  timeWarpFolder
+    .add(uiScene, 'timeWarpIntensity', 0, 1, 0.01)
+    .name('强度')
+    .onChange((v: number) => {
+      scene.timeWarp.intensity = v;
+    });
+  timeWarpFolder
+    .add(uiScene, 'timeWarpPotentialScale', 0.1, 5, 0.1)
+    .name('势阱强度')
+    .onChange((v: number) => {
+      scene.timeWarp.potentialScale = v;
+    });
+  timeWarpFolder
+    .add(uiScene, 'timeWarpDistanceScale', 0.5, 20, 0.5)
+    .name('距离参考')
+    .onChange((v: number) => {
+      scene.timeWarp.distanceScale = v;
     });
 
   function loadPreset(name: keyof typeof SCENE_PRESETS): void {
@@ -647,7 +687,18 @@ async function main(): Promise<void> {
       setF(gl, p.program, p.uniforms, 'adiskLit', params.adiskLit);
       setF(gl, p.program, p.uniforms, 'adiskNoiseLOD', params.adiskNoiseLOD);
       setF(gl, p.program, p.uniforms, 'adiskNoiseScale', params.adiskNoiseScale);
-      setF(gl, p.program, p.uniforms, 'adiskSpeed', params.adiskSpeed);
+      
+      // 应用时间缩放到吸积盘流动速度
+      let effectiveAdiskSpeed = params.adiskSpeed;
+      if (scene.timeWarp.enabled && scene.bodyCount >= 1) {
+        const b0 = scene.bodies[0]!;
+        // 计算吸积盘中心附近的时间缩放因子（距离为黑洞半径的2倍处）
+        const refDist = b0.visual.size * 2;
+        const refPos: [number, number, number] = [b0.position[0] + refDist, b0.position[1], b0.position[2]];
+        const timeWarpFactor = calculateTimeWarp(refPos, b0.position, b0.mass, scene);
+        effectiveAdiskSpeed *= timeWarpFactor;
+      }
+      setF(gl, p.program, p.uniforms, 'adiskSpeed', effectiveAdiskSpeed);
 
       bindSceneUniforms(gl, p, scene);
     });
