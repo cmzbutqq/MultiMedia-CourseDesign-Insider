@@ -695,7 +695,8 @@ async function main(): Promise<void> {
         // 计算吸积盘中心附近的时间缩放因子（距离为黑洞半径的2倍处）
         const refDist = b0.visual.size * 2;
         const refPos: [number, number, number] = [b0.position[0] + refDist, b0.position[1], b0.position[2]];
-        const timeWarpFactor = calculateTimeWarp(refPos, b0.position, b0.mass, scene);
+        const centralPotentialSource = scene.dynamics === 'kepler' ? scene.gmCentral : b0.mass;
+        const timeWarpFactor = calculateTimeWarp(refPos, b0.position, centralPotentialSource, scene);
         effectiveAdiskSpeed *= timeWarpFactor;
       }
       setF(gl, p.program, p.uniforms, 'adiskSpeed', effectiveAdiskSpeed);
