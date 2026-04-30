@@ -1,0 +1,61 @@
+# OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.AppleDouble
+.LSOverride
+
+# IDE
+.vscode/
+.idea/
+*.sublime-*
+*.code-workspace
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# Node (web/)
+node_modules/
+dist/
+*.local
+*.log
+
+# SSL/TLS certificates (never commit private keys)
+*.pem
+*.key
+nginx.key
+nginx.crt
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Docker
+docker-compose.override.yml
+*.tar
+
+# Logs
+logs/
+*.log
+
+# OS specific
+.DS_Store
+Trashes
+.Directory
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
