@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
 
 const repoName = process.env.GITHUB_REPOSITORY?.split('/')[1];
@@ -8,10 +10,33 @@ export default defineConfig({
   base: process.env.GITHUB_ACTIONS === 'true' ? pagesBase : '/',
   server: {
     host: '0.0.0.0',
-    port: 5173,
-    strictPort: true,
+    port: 5174,
+    strictPort: false,
+    https: (() => {
+      const keyPath = resolve(__dirname, 'localhost-key.pem');
+      const certPath = resolve(__dirname, 'localhost.pem');
+      if (!existsSync(keyPath) || !existsSync(certPath)) {
+        return undefined;
+      }
+      return {
+        key: readFileSync(keyPath),
+        cert: readFileSync(certPath),
+      };
+    })(),
     hmr: {
-      clientPort: 5173,
+      port: 5174,
+      clientPort: 5174,
+    },
+    cors: true,
+    proxy: {
+      '/health': {
+        target: process.env.VITE_SERVER_URL || 'http://localhost:5000',
+        changeOrigin: true,
+      },
+      '/api/detect': {
+        target: process.env.VITE_SERVER_URL || 'http://localhost:5000',
+        changeOrigin: true,
+      },
     },
   },
   publicDir: 'public',

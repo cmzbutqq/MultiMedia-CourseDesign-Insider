@@ -7,9 +7,11 @@
 - 基于 `WebGL2` 的实时黑洞场景渲染
 - 支持吸积盘、引力透镜等视觉效果调节
 - 集成 Bloom、Tonemapping、Gamma 等后处理链路
+- 抗锯齿管线（关闭 / FXAA / TAA 三档切换，支持质量参数调节）
+- 手势交互（本地 MediaPipe / 服务器双模式）
 - 通过 `lil-gui` 实时修改渲染参数
 - 提供本地开发与 Docker 容器化运行方式
-- 预留多天体、手势交互、在线部署等拓展方向
+- 预留多天体、模拟时间扭曲等拓展方向
 
 ## Tech Stack
 
@@ -49,25 +51,21 @@ npm run build
 
 ### Docker 运行
 
-开发模式：
+项目根目录的 `docker-compose.yml` 可一键部署前后端：
 
 ```bash
-docker compose up web-dev --build
+# 一键部署前后端（前台运行）
+docker compose up --build
+
+# 一键部署前后端（后台运行）
+docker compose up --build -d
 ```
 
 访问：
 
-- [http://localhost:5173](http://localhost:5173)
-
-生产模式：
-
-```bash
-docker compose up web-prod --build
-```
-
-访问：
-
-- [http://localhost:8080](http://localhost:8080)
+- http前端：[http://localhost:8080](http://localhost:8080) (http可能无法调用摄像头)
+- https前端：[https://localhost:8443](https://localhost:8443)
+- 手势服务器：[http://localhost:5000](http://localhost:5000)
 
 停止容器：
 
@@ -80,15 +78,11 @@ docker compose down
 ```text
 .
 ├── web/                     # Web 端主项目（Vite + TypeScript + WebGL2）
+├── server/                  # 手势识别服务端（Python + MediaPipe）
 ├── docs/                    # 设计与实施过程文档
-├── 拓展功能.md               # 后续功能拓展方向记录
-└── Blackhole/               # 参考项目
+├── docker-compose.yml       # Docker 容器编排配置（前后端一键部署）
+└── 拓展功能.md               # 后续功能拓展方向记录
 ```
-
-## Development Notes
-
-- 当前核心交付内容为 `web` 目录下的 Web 端实现
-- `Blackhole` 目录作为参考项目保留，不属于当前主要改造范围
 - Docker 方案同时覆盖开发态与生产态，便于本地调试和演示部署
 
 ## Roadmap
@@ -97,11 +91,18 @@ docker compose down
 
 - 更多天体类型
 - 多天体与简易轨道
-- 摄像头手势交互
 - 进阶视觉物理感
-- 抗锯齿
 - 模拟时间扭曲
 - 在线演示与网站部署
+
+**已实现：**
+
+- 抗锯齿（关闭 / FXAA / TAA 三档切换）
+- 摄像头手势交互（本地 + 服务器双模式）
+  - 张开手掌：检测到至少4根手指伸展，用于触发视角移动
+  - 捏合 (Pinch)：待多星系统开发后实现
+  - 拖拽 (Drag)：移动手掌位置来控制视角
+
 
 ## License
 
