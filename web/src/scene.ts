@@ -20,6 +20,17 @@ export interface SceneBody {
 
 export type DynamicsMode = 'static' | 'kepler' | 'nbody';
 
+export interface TimeWarpParams {
+  /** 是否启用局部时间缩放 */
+  enabled: boolean;
+  /** 时间缩放强度系数（0-1） */
+  intensity: number;
+  /** 势阱强度参考值 */
+  potentialScale: number;
+  /** 距离参考值（黑洞半径的倍数） */
+  distanceScale: number;
+}
+
 export interface SceneState {
   bodyCount: number;
   bodies: SceneBody[];
@@ -32,6 +43,8 @@ export interface SceneState {
   /** 每帧积分步长（秒，仿真时间） */
   dt: number;
   showTrails: boolean;
+  /** 局部时间缩放模型参数 */
+  timeWarp: TimeWarpParams;
 }
 
 export function defaultBodyParams(kind: BodyKind): BodyParams {
@@ -74,6 +87,10 @@ export function applySceneState(target: SceneState, src: SceneState): void {
   target.softening = src.softening;
   target.dt = src.dt;
   target.showTrails = src.showTrails;
+  target.timeWarp.enabled = src.timeWarp.enabled;
+  target.timeWarp.intensity = src.timeWarp.intensity;
+  target.timeWarp.potentialScale = src.timeWarp.potentialScale;
+  target.timeWarp.distanceScale = src.timeWarp.distanceScale;
   for (let i = 0; i < MAX_BODIES; i++) {
     const sb = src.bodies[i]!;
     const tb = target.bodies[i]!;

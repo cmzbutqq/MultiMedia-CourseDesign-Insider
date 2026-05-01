@@ -24,7 +24,7 @@ import {
   applySceneState,
   cloneSceneState,
 } from './scene.js';
-import { stepScene } from './physics.js';
+import { stepScene, calculateTimeWarp } from './physics.js';
 import { createDefaultScene, SCENE_PRESETS } from './scenePresets.js';
 import { getCameraLookBasis, worldToScreenPx } from './camera.js';
 import { TrailBuffer, TRAIL_COLORS } from './trails.js';
@@ -438,6 +438,10 @@ function syncUiSceneFromScene(
     softening: number;
     dt: number;
     showTrails: boolean;
+    timeWarpEnabled: boolean;
+    timeWarpIntensity: number;
+    timeWarpPotentialScale: number;
+    timeWarpDistanceScale: number;
   },
   scene: SceneState,
 ): void {
@@ -448,6 +452,10 @@ function syncUiSceneFromScene(
   uiScene.softening = scene.softening;
   uiScene.dt = scene.dt;
   uiScene.showTrails = scene.showTrails;
+  uiScene.timeWarpEnabled = scene.timeWarp.enabled;
+  uiScene.timeWarpIntensity = scene.timeWarp.intensity;
+  uiScene.timeWarpPotentialScale = scene.timeWarp.potentialScale;
+  uiScene.timeWarpDistanceScale = scene.timeWarp.distanceScale;
 }
 
 async function main(): Promise<void> {
@@ -832,6 +840,11 @@ async function main(): Promise<void> {
     dt: scene.dt,
     showTrails: scene.showTrails,
     presetName: '单天体' as keyof typeof SCENE_PRESETS,
+    // 时间缩放参数
+    timeWarpEnabled: scene.timeWarp.enabled,
+    timeWarpIntensity: scene.timeWarp.intensity,
+    timeWarpPotentialScale: scene.timeWarp.potentialScale,
+    timeWarpDistanceScale: scene.timeWarp.distanceScale,
   };
 
   const sceneFolder = gui.addFolder('场景');
@@ -878,6 +891,33 @@ async function main(): Promise<void> {
     .name('轨迹')
     .onChange((v: boolean) => {
       scene.showTrails = v;
+    });
+
+  // 局部时间缩放控制
+  const timeWarpFolder = sceneFolder.addFolder('时间缩放(仿真效果)');
+  timeWarpFolder
+    .add(uiScene, 'timeWarpEnabled')
+    .name('启用')
+    .onChange((v: boolean) => {
+      scene.timeWarp.enabled = v;
+    });
+  timeWarpFolder
+    .add(uiScene, 'timeWarpIntensity', 0, 1, 0.01)
+    .name('强度')
+    .onChange((v: number) => {
+      scene.timeWarp.intensity = v;
+    });
+  timeWarpFolder
+    .add(uiScene, 'timeWarpPotentialScale', 0.1, 5, 0.1)
+    .name('势阱强度')
+    .onChange((v: number) => {
+      scene.timeWarp.potentialScale = v;
+    });
+  timeWarpFolder
+    .add(uiScene, 'timeWarpDistanceScale', 0.5, 20, 0.5)
+    .name('距离参考')
+    .onChange((v: number) => {
+      scene.timeWarp.distanceScale = v;
     });
 
   function loadPreset(name: keyof typeof SCENE_PRESETS): void {
@@ -1090,49 +1130,58 @@ async function main(): Promise<void> {
         setF(gl, p.program, p.uniforms, 'adiskLit', params.adiskLit);
         setF(gl, p.program, p.uniforms, 'adiskNoiseLOD', params.adiskNoiseLOD);
         setF(gl, p.program, p.uniforms, 'adiskNoiseScale', params.adiskNoiseScale);
-        setF(gl, p.program, p.uniforms, 'adiskSpeed', params.adiskSpeed);
+
+        let effectiveAdiskSpeed = params.adiskSpeed;
+        if (scene.timeWarp.enabled && scene.bodyCount >= 1) {
+          const b0 = scene.bodies[0]!;
+          const refDist = b0.visual.size * 2;
+          const refPos: [number, number, number] = [b0.position[0] + refDist, b0.position[1], b0.position[2]];
+          const centralPotentialSource = scene.dynamics === 'kepler' ? scene.gmCentral : b0.mass;
+          const timeWarpFactor = calculateTimeWarp(refPos, b0.position, centralPotentialSource, scene);
+          effectiveAdiskSpeed *= timeWarpFactor;
+        }
+        setF(gl, p.program, p.uniforms, 'adiskSpeed', effectiveAdiskSpeed);
 
         bindSceneUniforms(gl, p, scene);
       });
 
-    let sceneTex = (() => {
+      let sceneTex = (() => {
       if (mainMsaa && mainResolved) {
         resolveMSAA(gl, mainMsaa, mainResolved, rw, rh);
         return mainResolved.texture;
       }
       return main.texture;
-    })();
+      })();
 
-    if (aaMode === 'taa' && taaBuffers) {
-      const readIdx = taaIdx % 2;
-      const writeIdx = 1 - readIdx;
-      if (firstFrame) {
-        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, mainMsaa ? mainResolved!.fbo : main.fbo);
-        gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, taaBuffers[0].fbo);
-        gl.blitFramebuffer(0, 0, rw, rh, 0, 0, rw, rh, gl.COLOR_BUFFER_BIT, gl.LINEAR);
-        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, mainMsaa ? mainResolved!.fbo : main.fbo);
-        gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, taaBuffers[1].fbo);
-        gl.blitFramebuffer(0, 0, rw, rh, 0, 0, rw, rh, gl.COLOR_BUFFER_BIT, gl.LINEAR);
-        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
-        gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
-        taaIdx = 1;
-      } else {
-        drawPass(gl, vao, passes.taaBlend, taaBuffers[writeIdx].fbo, rw, rh, time, () => {
-          const p = passes.taaBlend;
-          setI1(gl, p.program, p.uniforms, 'texture0', 0);
-          setI1(gl, p.program, p.uniforms, 'texture1', 1);
-          setF(gl, p.program, p.uniforms, 'firstFrame', 0.0);
-          setF(gl, p.program, p.uniforms, 'taaFeedback', params.taaFeedback);
-          gl.activeTexture(gl.TEXTURE0);
-          gl.bindTexture(gl.TEXTURE_2D, sceneTex);
-          gl.activeTexture(gl.TEXTURE1);
-          gl.bindTexture(gl.TEXTURE_2D, taaBuffers[readIdx].texture);
-        });
-        taaIdx++;
+      if (aaMode === 'taa' && taaBuffers) {
+        const readIdx = taaIdx % 2;
+        const writeIdx = 1 - readIdx;
+        if (firstFrame) {
+          gl.bindFramebuffer(gl.READ_FRAMEBUFFER, mainMsaa ? mainResolved!.fbo : main.fbo);
+          gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, taaBuffers[0].fbo);
+          gl.blitFramebuffer(0, 0, rw, rh, 0, 0, rw, rh, gl.COLOR_BUFFER_BIT, gl.LINEAR);
+          gl.bindFramebuffer(gl.READ_FRAMEBUFFER, mainMsaa ? mainResolved!.fbo : main.fbo);
+          gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, taaBuffers[1].fbo);
+          gl.blitFramebuffer(0, 0, rw, rh, 0, 0, rw, rh, gl.COLOR_BUFFER_BIT, gl.LINEAR);
+          gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+          gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+          taaIdx = 1;
+        } else {
+          drawPass(gl, vao, passes.taaBlend, taaBuffers[writeIdx].fbo, rw, rh, time, () => {
+            const p = passes.taaBlend;
+            setI1(gl, p.program, p.uniforms, 'texture0', 0);
+            setI1(gl, p.program, p.uniforms, 'texture1', 1);
+            setF(gl, p.program, p.uniforms, 'firstFrame', 0.0);
+            setF(gl, p.program, p.uniforms, 'taaFeedback', params.taaFeedback);
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, sceneTex);
+            gl.activeTexture(gl.TEXTURE1);
+            gl.bindTexture(gl.TEXTURE_2D, taaBuffers[readIdx].texture);
+          });
+          taaIdx++;
+        }
+        sceneTex = taaBuffers[firstFrame ? 0 : ((taaIdx - 1) % 2)].texture;
       }
-      sceneTex = taaBuffers[firstFrame ? 0 : ((taaIdx - 1) % 2)].texture;
-    }
-
     drawPass(gl, vao, passes.bloomBright, brightness.fbo, rw, rh, time, () => {
       const p = passes.bloomBright;
       setI1(gl, p.program, p.uniforms, 'texture0', 0);
