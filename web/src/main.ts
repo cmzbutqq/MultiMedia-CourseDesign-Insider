@@ -26,6 +26,11 @@ import {
   velocityRef,
   visualRef,
 } from './bodyBindings.js';
+import { recordingManager } from './recordingManager.js';
+import { ambientAudio } from './ambientAudio.js';
+
+// 暴露到全局作用域以便在控制台调试
+(window as any).recordingManager = recordingManager;
 
 import simpleVert from '../shader/simple.vert?raw';
 import blackholeMainFrag from '../shader/blackhole_main.frag?raw';
@@ -596,6 +601,175 @@ async function main(): Promise<void> {
   gui.add(params, 'tonemappingEnabled');
   gui.add(params, 'gamma', 1, 4);
 
+  // 录制/回放控制
+  const recordingFolder = gui.addFolder('录制/回放');
+  const recordingState = {
+    status: '就绪',
+    frameCount: 0,
+    playbackProgress: 0,
+  };
+
+  recordingFolder
+    .add(
+      {
+        startRecording() {
+          recordingManager.startRecording();
+          recordingState.status = '录制中...';
+          recordingState.frameCount = 0;
+        },
+      },
+      'startRecording',
+    )
+    .name('开始录制');
+
+  recordingFolder
+    .add(
+      {
+        stopRecording() {
+          recordingManager.stopRecording();
+          recordingState.frameCount = recordingManager.frames.length;
+          recordingState.status = `已停止 (${recordingState.frameCount}帧)`;
+        },
+      },
+      'stopRecording',
+    )
+    .name('停止录制');
+
+  recordingFolder
+    .add(
+      {
+        startPlayback() {
+          if (recordingManager.frames.length > 0) {
+            // 重置到初始快照
+            applySceneState(scene, cloneSceneState(initialSnapshot));
+            trails.reset();
+          }
+          recordingManager.startPlayback();
+          recordingState.status = '回放中...';
+        },
+      },
+      'startPlayback',
+    )
+    .name('开始回放');
+
+  recordingFolder
+    .add(
+      {
+        stopPlayback() {
+          recordingManager.stopPlayback();
+          recordingState.status = '回放已停止';
+        },
+      },
+      'stopPlayback',
+    )
+    .name('停止回放');
+
+  recordingFolder
+    .add(recordingState, 'playbackProgress', 0, 1, 0.01)
+    .name('进度')
+    .listen()
+    .onChange((v: number) => {
+      recordingManager.setPlaybackProgress(v);
+    });
+
+  recordingFolder
+    .add(
+      {
+        exportJSON() {
+          const json = recordingManager.exportJSON();
+          const blob = new Blob([json], { type: 'application/json' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `recording-${Date.now()}.json`;
+          a.click();
+          URL.revokeObjectURL(url);
+          recordingState.status = '已导出JSON';
+        },
+      },
+      'exportJSON',
+    )
+    .name('导出JSON');
+
+  recordingFolder
+    .add(
+      {
+        importJSON() {
+          const input = document.createElement('input');
+          input.type = 'file';
+          input.accept = '.json';
+          input.onchange = (e: Event) => {
+            const file = (e.target as HTMLInputElement).files?.[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = () => {
+              try {
+                recordingManager.importJSON(reader.result as string);
+                recordingState.frameCount = recordingManager.frames.length;
+                recordingState.status = `已导入 (${recordingState.frameCount}帧)`;
+              } catch (err) {
+                recordingState.status = '导入失败';
+                console.error(err);
+              }
+            };
+            reader.readAsText(file);
+          };
+          input.click();
+        },
+      },
+      'importJSON',
+    )
+    .name('导入JSON');
+
+  recordingFolder
+    .add(
+      {
+        saveToLocalStorage() {
+          recordingManager.saveToLocalStorage('recording');
+          recordingState.status = '已保存到本地存储';
+        },
+      },
+      'saveToLocalStorage',
+    )
+    .name('保存到本地');
+
+  recordingFolder
+    .add(
+      {
+        loadFromLocalStorage() {
+          recordingManager.loadFromLocalStorage('recording');
+          recordingState.frameCount = recordingManager.frames.length;
+          recordingState.status = `已加载 (${recordingState.frameCount}帧)`;
+        },
+      },
+      'loadFromLocalStorage',
+    )
+    .name('从本地加载');
+
+  // 状态显示（必须 listen 才会随对象变化刷新）
+  recordingFolder.add(recordingState, 'status').name('状态').listen();
+  recordingFolder.add(recordingState, 'frameCount').name('帧数').listen();
+
+  // 氛围音频控制
+  const audioFolder = gui.addFolder('氛围音频');
+  const audioState = {
+    enabled: false,
+    volume: 0.5,
+  };
+  audioFolder
+    .add(audioState, 'enabled')
+    .name('启用')
+    .onChange(async (v: boolean) => {
+      await ambientAudio.toggle(v);
+      audioState.enabled = ambientAudio.isEnabled();
+    });
+  audioFolder
+    .add(audioState, 'volume', 0, 1, 0.01)
+    .name('音量')
+    .onChange((v: number) => {
+      ambientAudio.setVolume(v);
+    });
+
   function drawTrails(time: number): void {
     if (!trailCanvas || !trailCtx) return;
     const w = trailCanvas.width;
@@ -648,7 +822,67 @@ async function main(): Promise<void> {
     const time = now / 1000;
     if (!pipeline) return;
 
-    stepScene(scene);
+    // 回放模式不进行物理模拟
+    if (!recordingManager.isPlayback) {
+      stepScene(scene);
+    }
+
+    // 录制当前帧（如果正在录制）
+    const cam = getCameraLookBasis(
+      time,
+      mouseX,
+      mouseY,
+      gl.canvas.clientWidth,
+      gl.canvas.clientHeight,
+      params.mouseControl,
+      params.frontView,
+      params.topView,
+      params.cameraRoll,
+    );
+    recordingManager.recordFrame(
+      time,
+      cam.cameraPos,
+      params.cameraRoll,
+      params.mouseControl,
+      params.frontView,
+      params.topView,
+      mouseX,
+      mouseY,
+      scene,
+      params,
+    );
+
+    // 回放模式：应用回放帧数据
+    const playbackFrame = recordingManager.getPlaybackFrame();
+    if (playbackFrame) {
+      // 仅在进度变化时输出调试信息（避免每帧都输出）
+      if (Math.random() < 0.02) {
+        console.log(`📹 回放帧: ${recordingManager.getPlaybackProgress().toFixed(2)}% - bodies:${playbackFrame.scene.bodyCount}`);
+      }
+      Object.assign(params, {
+        cameraRoll: playbackFrame.camera.roll,
+        mouseControl: playbackFrame.camera.mouseControl,
+        frontView: playbackFrame.camera.frontView,
+        topView: playbackFrame.camera.topView,
+      });
+      mouseX = playbackFrame.camera.mouseX ?? 0;
+      mouseY = playbackFrame.camera.mouseY ?? 0;
+      applySceneState(scene, playbackFrame.scene);
+      Object.assign(params, playbackFrame.render);
+      gui.controllersRecursive().forEach((c) => c.updateDisplay());
+    }
+
+    // 每帧同步录制 UI 状态
+    const recStatus = recordingManager.getStatus();
+    recordingState.frameCount = recStatus.frameCount;
+    recordingState.playbackProgress = recStatus.playbackProgress;
+    if (recStatus.isRecording) {
+      recordingState.status = `录制中... ${recStatus.frameCount}帧 / ${recStatus.duration.toFixed(1)}s`;
+    } else if (recStatus.isPlayback) {
+      recordingState.status = `回放中... ${(recStatus.playbackProgress * 100).toFixed(0)}%`;
+    }
+
+    ambientAudio.update(scene, time);
 
     if (scene.showTrails) {
       for (let bi = 0; bi < scene.bodyCount; bi++) {
