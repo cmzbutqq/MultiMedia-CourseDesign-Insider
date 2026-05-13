@@ -13,14 +13,14 @@ function softInvCube(dx: number, dy: number, dz: number, eps: number): [number, 
  * 基于与黑洞距离和势阱强度
  * @param position 粒子位置 [x, y, z]
  * @param centerPos 中心天体位置 [x, y, z]
- * @param mass 中心天体质量
+ * @param potentialSource 时间缩放势源强度（Kepler 模式下对应 μ=GM，N 体模式下通常对应中心质量）
  * @param state 场景状态
  * @returns 时间缩放因子 (0-1]，越小时间越慢
  */
 export function calculateTimeWarp(
   position: [number, number, number],
   centerPos: [number, number, number],
-  mass: number,
+  potentialSource: number,
   state: SceneState,
 ): number {
   if (!state.timeWarp.enabled) return 1.0;
@@ -31,7 +31,7 @@ export function calculateTimeWarp(
   const r = Math.sqrt(dx * dx + dy * dy + dz * dz);
 
   // 计算引力势 (GM/r)
-  const potential = (mass * state.timeWarp.potentialScale) / Math.max(r, 0.1);
+  const potential = (potentialSource * state.timeWarp.potentialScale) / Math.max(r, 0.1);
 
   // 计算距离贡献 (越近时间越慢)
   const distanceTerm = 1.0 / (1.0 + r / Math.max(state.timeWarp.distanceScale, 0.1));
@@ -68,8 +68,8 @@ function stepKeplerCentral(state: SceneState): void {
     const [ix, iy, iz] = softInvCube(rx, ry, rz, eps);
     acc[i] = [-mu * ix, -mu * iy, -mu * iz];
     
-    // 计算时间缩放因子
-    timeWarpFactors[i] = calculateTimeWarp(b[i].position, b[0].position, b[0].mass, state);
+    // Kepler 模式的引力与时间缩放都应由同一个中心 μ 驱动。
+    timeWarpFactors[i] = calculateTimeWarp(b[i].position, b[0].position, mu, state);
   }
 
   for (let i = 1; i < n; i++) {

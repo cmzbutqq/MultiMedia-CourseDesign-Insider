@@ -4,11 +4,19 @@ import {
   type ColorRTFormat,
   compileProgram,
   createColorRT,
+  createMSAART,
   createQuadVAO,
   destroyColorRT,
+  destroyMSAART,
   detectRTFormat,
+  resolveMSAA,
+  type MSAART,
 } from './gl.js';
 import { loadCubemap, loadTexture2D } from './resources.js';
+import {
+  HandGestureController,
+} from './handGesture.js';
+import { ServerGestureClient } from './serverGestureClient.js';
 import {
   MAX_BODIES,
   type BodyKind,
@@ -40,15 +48,46 @@ import bloomUpFrag from '../shader/bloom_upsample.frag?raw';
 import bloomCompositeFrag from '../shader/bloom_composite.frag?raw';
 import tonemappingFrag from '../shader/tonemapping.frag?raw';
 import passthroughFrag from '../shader/passthrough.frag?raw';
+import fxaaFrag from '../shader/fxaa.frag?raw';
+import taaBlendFrag from '../shader/taa_blend.frag?raw';
 
 const MAX_BLOOM_ITER = 8;
 const MAX_DPR = 2;
 const LENS_MASS_REF = 10;
 
+type AntialiasMode = 'off' | 'fxaa' | 'taa';
+type GestureMode = 'off' | 'local' | 'server';
+
+interface PipelineAllocResult {
+  pipeline: PipelineRTs;
+  format: ColorRTFormat;
+  effectiveAaMode: AntialiasMode;
+}
+
+function bodyKindShaderValue(k: BodyKind): number {
+  if (k === 'blackHole') return 0;
+  if (k === 'whiteHole') return 1;
+  return 2;
+}
+
+function parseHexColorRgb(hex: string): [number, number, number] {
+  const h = hex.replace('#', '');
+  if (h.length !== 6) return [0, 0, 0];
+  const r = parseInt(h.slice(0, 2), 16) / 255;
+  const g = parseInt(h.slice(2, 4), 16) / 255;
+  const b = parseInt(h.slice(4, 6), 16) / 255;
+  return [r, g, b];
+}
+
 interface Params {
+  antialias: AntialiasMode;
+  fxaaQuality: 0 | 1 | 2; // 0=Low, 1=Medium, 2=High
+  msaaSamples: 0 | 2 | 4 | 8;
+  taaFeedback: number;
   gravatationalLensing: boolean;
   renderBlackHole: boolean;
   mouseControl: boolean;
+  gestureMode: 'off' | 'local' | 'server';
   cameraRoll: number;
   frontView: boolean;
   topView: boolean;
@@ -68,9 +107,14 @@ interface Params {
 }
 
 const params: Params = {
+  antialias: 'fxaa',
+  fxaaQuality: 2,
+  msaaSamples: 4,
+  taaFeedback: 8,
   gravatationalLensing: true,
   renderBlackHole: true,
   mouseControl: true,
+  gestureMode: 'off',
   cameraRoll: 0,
   frontView: false,
   topView: false,
@@ -89,28 +133,17 @@ const params: Params = {
   gamma: 2.5,
 };
 
-function bodyKindShaderValue(k: BodyKind): number {
-  if (k === 'blackHole') return 0;
-  if (k === 'whiteHole') return 1;
-  return 2;
-}
-
-function parseHexColorRgb(hex: string): [number, number, number] {
-  const h = hex.replace('#', '');
-  if (h.length !== 6) return [0, 0, 0];
-  const r = parseInt(h.slice(0, 2), 16) / 255;
-  const g = parseInt(h.slice(2, 4), 16) / 255;
-  const b = parseInt(h.slice(4, 6), 16) / 255;
-  return [r, g, b];
-}
-
 interface PipelineRTs {
   main: ColorRT;
+  mainMsaa: MSAART | null;
+  mainResolved: ColorRT | null;
   brightness: ColorRT;
   down: ColorRT[];
   up: ColorRT[];
   bloomFinal: ColorRT;
+  taaBuffers: [ColorRT, ColorRT] | null;
   tonemapped: ColorRT;
+  output: ColorRT;
   width: number;
   height: number;
   format: ColorRTFormat;
@@ -119,9 +152,16 @@ interface PipelineRTs {
 function destroyPipeline(gl: WebGL2RenderingContext, p: PipelineRTs | null): void {
   if (!p) return;
   destroyColorRT(gl, p.main);
+  if (p.mainMsaa) destroyMSAART(gl, p.mainMsaa);
+  if (p.mainResolved) destroyColorRT(gl, p.mainResolved);
   destroyColorRT(gl, p.brightness);
   destroyColorRT(gl, p.bloomFinal);
+  if (p.taaBuffers) {
+    destroyColorRT(gl, p.taaBuffers[0]);
+    destroyColorRT(gl, p.taaBuffers[1]);
+  }
   destroyColorRT(gl, p.tonemapped);
+  destroyColorRT(gl, p.output);
   for (const rt of p.down) destroyColorRT(gl, rt);
   for (const rt of p.up) destroyColorRT(gl, rt);
 }
@@ -131,11 +171,24 @@ function allocPipeline(
   width: number,
   height: number,
   format: ColorRTFormat,
+  aaMode: AntialiasMode,
+  msaaSamples: number,
 ): PipelineRTs {
   const main = createColorRT(gl, width, height, format);
+  // createMSAART returns null if MSAA is not supported on this device
+  // Note: if it returns null with samples > 1 due to MAX_SAMPLES or texImage2DMultisample
+  // issues, retrying with 1 sample will also fail - detect that and skip MSAA entirely
+  let mainMsaa = aaMode === 'taa' ? createMSAART(gl, width, height, format, msaaSamples) : null;
+  let mainResolved = mainMsaa ? createColorRT(gl, width, height, format) : null;
+  // If MSAA returned null but we have samples > 1, it means device can't do MSAA
+  // (not just that samples were clamped to 1) - don't retry, just run TAA without MSAA
   const brightness = createColorRT(gl, width, height, format);
   const bloomFinal = createColorRT(gl, width, height, format);
   const tonemapped = createColorRT(gl, width, height, format);
+  const output = createColorRT(gl, width, height, format);
+  const taaBuffers: [ColorRT, ColorRT] | null = aaMode === 'taa'
+    ? [createColorRT(gl, width, height, format), createColorRT(gl, width, height, format)]
+    : null;
   const down: ColorRT[] = [];
   const up: ColorRT[] = [];
   for (let i = 0; i < MAX_BLOOM_ITER; i++) {
@@ -146,20 +199,86 @@ function allocPipeline(
     const uh = Math.max(1, height >> i);
     up.push(createColorRT(gl, uw, uh, format));
   }
-  return { main, brightness, down, up, bloomFinal, tonemapped, width, height, format };
+  return { main, mainMsaa, mainResolved, brightness, down, up, bloomFinal, taaBuffers, tonemapped, output, width, height, format };
 }
 
 function tryAllocPipeline(
   gl: WebGL2RenderingContext,
   width: number,
   height: number,
-): { pipeline: PipelineRTs; format: ColorRTFormat } {
+  aaMode: AntialiasMode,
+  msaaSamples: number,
+): PipelineAllocResult {
   const preferred = detectRTFormat(gl);
   try {
-    return { pipeline: allocPipeline(gl, width, height, preferred), format: preferred };
-  } catch {
+    return {
+      pipeline: allocPipeline(gl, width, height, preferred, aaMode, msaaSamples),
+      format: preferred,
+      effectiveAaMode: aaMode,
+    };
+  } catch (e) {
+    console.warn('[blackhole-web] Pipeline allocation failed, retrying with fallback:', e);
+    // Fallback 1: try with rgba8 format
     if (preferred === 'float16') {
-      return { pipeline: allocPipeline(gl, width, height, 'rgba8'), format: 'rgba8' };
+      try {
+        return {
+          pipeline: allocPipeline(gl, width, height, 'rgba8', aaMode, msaaSamples),
+          format: 'rgba8',
+          effectiveAaMode: aaMode,
+        };
+      } catch (e2) {
+        console.warn('[blackhole-web] Pipeline allocation with rgba8 also failed:', e2);
+      }
+    }
+    // Fallback 2: if TAA failed with MSAA samples > 1, try TAA with samples clamped to 1
+    // But skip this if createMSAART was failing due to missing texImage2DMultisample
+    // In that case just fall back to FXAA or off directly
+    if (aaMode === 'taa' && msaaSamples > 1) {
+      // Check if maxSamples is available - if not, MSAA won't work at any sample count
+      const maxSamples = gl.getParameter(gl.MAX_SAMPLES);
+      if (maxSamples > 0) {
+        try {
+          console.warn('[blackhole-web] Retrying TAA with reduced MSAA samples');
+          const p = allocPipeline(gl, width, height, 'rgba8', 'taa', 1);
+          return { pipeline: p, format: 'rgba8', effectiveAaMode: 'taa' };
+        } catch (e3) {
+          console.warn('[blackhole-web] TAA with 1 sample also failed:', e3);
+        }
+      } else {
+        console.warn('[blackhole-web] MAX_SAMPLES=0, skipping MSAA retry');
+      }
+      // Fallback 3: try FXAA as last resort for antialiasing
+      try {
+        console.warn('[blackhole-web] Trying FXAA as final fallback');
+        return {
+          pipeline: allocPipeline(gl, width, height, 'rgba8', 'fxaa', 0),
+          format: 'rgba8',
+          effectiveAaMode: 'fxaa',
+        };
+      } catch (e4) {
+        console.warn('[blackhole-web] FXAA also failed:', e4);
+      }
+    }
+    // If we get here with TAA mode, try FXAA or off as last resort
+    if (aaMode === 'taa') {
+      try {
+        return {
+          pipeline: allocPipeline(gl, width, height, 'rgba8', 'fxaa', 0),
+          format: 'rgba8',
+          effectiveAaMode: 'fxaa',
+        };
+      } catch (e5) {
+        console.warn('[blackhole-web] FXAA also failed:', e5);
+      }
+      try {
+        return {
+          pipeline: allocPipeline(gl, width, height, 'rgba8', 'off', 0),
+          format: 'rgba8',
+          effectiveAaMode: 'off',
+        };
+      } catch (e6) {
+        console.error('[blackhole-web] All fallbacks exhausted:', e6);
+      }
     }
     throw new Error('无法创建离屏渲染目标');
   }
@@ -173,10 +292,11 @@ function ulCache(
   cache: UniformMap,
   name: string,
 ): WebGLUniformLocation | null {
-  if (!cache.has(name)) {
-    cache.set(name, gl.getUniformLocation(program, name));
-  }
-  return cache.get(name)!;
+  const cached = cache.get(name);
+  if (cached !== undefined) return cached;
+  const loc = gl.getUniformLocation(program, name);
+  cache.set(name, loc);
+  return loc;
 }
 
 function setF(
@@ -186,6 +306,7 @@ function setF(
   name: string,
   v: number,
 ): void {
+  gl.useProgram(program);
   const loc = ulCache(gl, program, cache, name);
   if (loc) gl.uniform1f(loc, v);
 }
@@ -198,21 +319,9 @@ function setV2(
   x: number,
   y: number,
 ): void {
+  gl.useProgram(program);
   const loc = ulCache(gl, program, cache, name);
   if (loc) gl.uniform2f(loc, x, y);
-}
-
-function setV3(
-  gl: WebGL2RenderingContext,
-  program: WebGLProgram,
-  cache: UniformMap,
-  name: string,
-  x: number,
-  y: number,
-  z: number,
-): void {
-  const loc = ulCache(gl, program, cache, name);
-  if (loc) gl.uniform3f(loc, x, y, z);
 }
 
 function setI1(
@@ -222,6 +331,7 @@ function setI1(
   name: string,
   v: number,
 ): void {
+  gl.useProgram(program);
   const loc = ulCache(gl, program, cache, name);
   if (loc) gl.uniform1i(loc, v);
 }
@@ -260,6 +370,20 @@ function drawPass(
   gl.drawArrays(gl.TRIANGLES, 0, 6);
   gl.bindVertexArray(null);
   gl.useProgram(null);
+}
+
+function setV3(
+  gl: WebGL2RenderingContext,
+  program: WebGLProgram,
+  cache: UniformMap,
+  name: string,
+  x: number,
+  y: number,
+  z: number,
+): void {
+  gl.useProgram(program);
+  const loc = ulCache(gl, program, cache, name);
+  if (loc) gl.uniform3f(loc, x, y, z);
 }
 
 function bindSceneUniforms(
@@ -343,7 +467,6 @@ async function main(): Promise<void> {
   const canvas = document.getElementById('c') as HTMLCanvasElement;
   const trailCanvas = document.getElementById('trail') as HTMLCanvasElement | null;
   const trailCtx = trailCanvas?.getContext('2d');
-
   const glCtx = canvas.getContext('webgl2', {
     antialias: false,
     depth: false,
@@ -371,11 +494,17 @@ async function main(): Promise<void> {
       bloomUp: makePass(gl, simpleVert, bloomUpFrag),
       bloomComposite: makePass(gl, simpleVert, bloomCompositeFrag),
       tonemap: makePass(gl, simpleVert, tonemappingFrag),
+      fxaa: makePass(gl, simpleVert, fxaaFrag),
+      taaBlend: makePass(gl, simpleVert, taaBlendFrag),
       passthrough: makePass(gl, simpleVert, passthroughFrag),
     }),
   ]);
 
   setI1(gl, passes.passthrough.program, passes.passthrough.uniforms, 'texture0', 0);
+  setI1(gl, passes.fxaa.program, passes.fxaa.uniforms, 'texture0', 0);
+  setI1(gl, passes.fxaa.program, passes.fxaa.uniforms, 'fxaaQuality', params.fxaaQuality);
+  setF(gl, passes.taaBlend.program, passes.taaBlend.uniforms, 'taaFeedback', params.taaFeedback);
+  setF(gl, passes.taaBlend.program, passes.taaBlend.uniforms, 'firstFrame', 1.0);
 
   let mouseX = 0;
   let mouseY = 0;
@@ -388,8 +517,209 @@ async function main(): Promise<void> {
     mouseY = (e.clientY - rect.top) * sy;
   });
 
+  let handGestureController: HandGestureController | null = null;
+  let serverGestureClient: ServerGestureClient | null = null;
+  let handVideo: HTMLVideoElement | null = null;
+  let handCanvas: HTMLCanvasElement | null = null;
+  let handOverlay: HTMLDivElement | null = null;
+  let previousGestureMode: 'off' | 'local' | 'server' = 'off';
+  let gestureInitToken = 0;
+  let gestureSwitchQueue: Promise<void> = Promise.resolve();
+
+  function cleanupGestureResources(removeDom = true): void {
+    if (handGestureController) {
+      handGestureController.destroy();
+      handGestureController = null;
+    }
+    if (serverGestureClient) {
+      serverGestureClient.destroy();
+      serverGestureClient = null;
+    }
+    if (removeDom) {
+      const v = handVideo;
+      const c = handCanvas;
+      const o = handOverlay;
+      handVideo = null;
+      handCanvas = null;
+      handOverlay = null;
+      v?.remove();
+      c?.remove();
+      o?.remove();
+    }
+  }
+
+  async function initHandGesture(targetMode: Exclude<GestureMode, 'off'>): Promise<boolean> {
+    try {
+      handVideo = document.createElement('video');
+      handVideo.style.cssText = 'position:fixed;bottom:10px;left:10px;width:160px;height:120px;border:2px solid #00ff00;border-radius:8px;opacity:0.8;z-index:1000;transform:scaleX(-1);';
+      handVideo.playsInline = true;
+      handVideo.muted = true;
+      handVideo.autoplay = true;
+
+      handCanvas = document.createElement('canvas');
+      handCanvas.width = 160;
+      handCanvas.height = 120;
+      handCanvas.style.cssText = 'position:fixed;bottom:135px;left:10px;border:2px solid #00ff00;border-radius:8px;opacity:0.8;z-index:1000;transform:scaleX(-1);';
+
+      handOverlay = document.createElement('div');
+      handOverlay.style.cssText = 'position:fixed;bottom:260px;left:10px;padding:8px 12px;background:rgba(0,0,0,0.7);color:#00ff00;border-radius:4px;font-size:12px;font-family:monospace;z-index:1000;';
+      handOverlay.textContent = `手势: 正在初始化 (${targetMode === 'server' ? '服务器模式' : '本地模式'})...`;
+
+      document.body.appendChild(handVideo);
+      document.body.appendChild(handCanvas);
+      document.body.appendChild(handOverlay);
+
+      // 等待DOM完全渲染
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      if (targetMode === 'server') {
+        return await initServerGesture();
+      } else {
+        return await initLocalGesture();
+      }
+    } catch (error) {
+      if (handOverlay?.isConnected) {
+        handOverlay.textContent = '手势: 初始化错误';
+        handOverlay.style.color = '#ff4444';
+      }
+      console.error('[blackhole-web] 手势控制初始化错误:', error);
+      cleanupGestureResources(false);
+      return false;
+    }
+  }
+
+  async function initLocalGesture(): Promise<boolean> {
+    handGestureController = new HandGestureController();
+    const success = await handGestureController.initialize(handVideo!, handCanvas!);
+
+    if (success) {
+      handGestureController.onGesture((event) => {
+        updateGestureOverlay(event);
+        
+        if (event.type === 'hand_move' || event.type === 'hand_detected') {
+          const state = event.gestureState;
+          if (state.handDetected && state.isOpenPalm) {
+            mouseX = state.palmX * canvas.width;
+            mouseY = (1 - state.palmY) * canvas.height;
+          }
+        }
+      });
+
+      handGestureController.setEnabled(true);
+      console.log('[blackhole-web] 本地手势控制初始化成功');
+      return true;
+    } else {
+      if (handOverlay?.isConnected) {
+        handOverlay.textContent = '手势: 摄像头不可用';
+        handOverlay.style.color = '#ff4444';
+      }
+      console.error('[blackhole-web] 本地手势控制初始化失败');
+      handGestureController.destroy();
+      handGestureController = null;
+      return false;
+    }
+  }
+
+  async function initServerGesture(): Promise<boolean> {
+    console.log('[ServerGesture] window.location.protocol:', window.location.protocol);
+    serverGestureClient = new ServerGestureClient();
+
+    const success = await serverGestureClient.initialize(handVideo!, handCanvas!);
+
+    if (success) {
+      serverGestureClient.onGesture((event) => {
+        updateGestureOverlay(event);
+        
+        if (event.type === 'hand_move' || event.type === 'hand_detected') {
+          const state = event.gestureState;
+          if (state.handDetected && state.isOpenPalm) {
+            mouseX = state.palmX * canvas.width;
+            mouseY = (1 - state.palmY) * canvas.height;
+          }
+        }
+      });
+
+      serverGestureClient.enable();
+      if (handOverlay?.isConnected) {
+        handOverlay.textContent = '手势: 服务器模式已连接';
+      }
+      console.log('[blackhole-web] 服务器端手势控制初始化成功');
+      return true;
+    } else {
+      if (handOverlay?.isConnected) {
+        handOverlay.textContent = '手势: 初始化失败';
+        handOverlay.style.color = '#ff4444';
+      }
+      console.error('[blackhole-web] 服务器端手势控制初始化失败');
+      serverGestureClient.destroy();
+      serverGestureClient = null;
+      return false;
+    }
+  }
+
+  function updateGestureOverlay(event: any): void {
+    if (!handOverlay) return;
+    
+    if (event.type === 'hand_detected') {
+      handOverlay.textContent = `手势: 检测到手部`;
+    } else if (event.type === 'hand_lost') {
+      handOverlay.textContent = `手势: 未检测到手`;
+    } else if (event.type === 'hand_move') {
+      const state = event.gestureState;
+      handOverlay.textContent = `手势: 张开手掌 (${state.fingerCount}指) [${(state.palmX * 100).toFixed(0)}%, ${(state.palmY * 100).toFixed(0)}%]`;
+    }
+  }
+
+  let lastFrameTime = 0;
+  const frameInterval = 100;
+
+  async function updateHandGesture(): Promise<void> {
+    if (params.gestureMode === 'off') return;
+
+    if (params.gestureMode === 'server') {
+      return;
+    }
+
+    if (!handGestureController) return;
+
+    const now = performance.now();
+    if (now - lastFrameTime < frameInterval) return;
+    lastFrameTime = now;
+
+    try {
+      await handGestureController.processFrame();
+    } catch (err) {
+      return;
+    }
+
+    const state = handGestureController.getState();
+
+    if (!state.handDetected) {
+      if (handOverlay) {
+        handOverlay.textContent = `手势: 正在初始化（本地模式）`;
+      }
+    }
+  }
+
   let pipeline: PipelineRTs | null = null;
   let rtFormat: ColorRTFormat = 'rgba8';
+  let lastMsaaSamples = params.msaaSamples;
+  let lastAntialiasMode: AntialiasMode = params.antialias;
+  let activeAntialiasMode: AntialiasMode = params.antialias;
+  let firstFrame = true;
+  let taaIdx = 0;
+  let rebuildScheduled = false;
+  let pendingResizeSource:
+    | 'resize-observer'
+    | 'gui-antialias'
+    | 'gui-msaa'
+    | 'startup'
+    | null = 'startup';
+
+  function resetTaaHistory(): void {
+    firstFrame = true;
+    taaIdx = 0;
+  }
 
   function resizeTrailCanvas(): void {
     if (!trailCanvas || !trailCtx) return;
@@ -408,16 +738,26 @@ async function main(): Promise<void> {
     const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
     const w = Math.max(1, Math.floor(canvas.clientWidth * dpr));
     const h = Math.max(1, Math.floor(canvas.clientHeight * dpr));
-    if (canvas.width === w && canvas.height === h && pipeline) {
+    const needsMsaaRebuild = pipeline && params.msaaSamples !== lastMsaaSamples;
+    const needsAaModeRebuild = pipeline && params.antialias !== lastAntialiasMode;
+    if (canvas.width === w && canvas.height === h && pipeline && !needsMsaaRebuild && !needsAaModeRebuild) {
       resizeTrailCanvas();
       return;
+    }
+    if (needsMsaaRebuild) {
+      lastMsaaSamples = params.msaaSamples;
+    }
+    if (needsAaModeRebuild) {
+      lastAntialiasMode = params.antialias;
     }
     canvas.width = w;
     canvas.height = h;
     destroyPipeline(gl, pipeline);
-    const r = tryAllocPipeline(gl, w, h);
+    const r = tryAllocPipeline(gl, w, h, params.antialias, params.msaaSamples);
     pipeline = r.pipeline;
     rtFormat = r.format;
+    activeAntialiasMode = r.effectiveAaMode;
+    resetTaaHistory();
     resizeTrailCanvas();
     if (rtFormat === 'rgba8') {
       console.warn(
@@ -426,11 +766,67 @@ async function main(): Promise<void> {
     }
   }
 
-  const ro = new ResizeObserver(() => resizeNow());
+  function scheduleResizeNow(source: 'resize-observer' | 'gui-antialias' | 'gui-msaa' | 'startup'): void {
+    pendingResizeSource = source;
+    if (rebuildScheduled) return;
+    rebuildScheduled = true;
+    requestAnimationFrame(() => {
+      rebuildScheduled = false;
+      if (!pendingResizeSource) return;
+      pendingResizeSource = null;
+      resizeNow();
+    });
+  }
+
+  const ro = new ResizeObserver(() => {
+    scheduleResizeNow('resize-observer');
+  });
   ro.observe(canvas);
-  resizeNow();
+  scheduleResizeNow('startup');
 
   const gui = new GUI({ title: '参数' });
+
+  gui.add(params, 'antialias', {
+    '关闭 (Off)': 'off',
+    '快速边缘平滑 (FXAA)': 'fxaa',
+    '时序抗锯齿 (TAA)': 'taa',
+  }).name('抗锯齿').onChange((v: AntialiasMode) => {
+    fxaaQualityCtrl.domElement.style.display = v === 'fxaa' ? '' : 'none';
+    msaaSamplesCtrl.domElement.style.display = v === 'taa' ? '' : 'none';
+    taaFeedbackCtrl.domElement.style.display = v === 'taa' ? '' : 'none';
+    scheduleResizeNow('gui-antialias');
+  });
+
+  const fxaaQualityCtrl = gui.add(params, 'fxaaQuality', {
+    '低 (Low)': 0,
+    '中 (Medium)': 1,
+    '高 (High)': 2,
+  }).name('FXAA质量').onChange(() => {
+    if (passes.fxaa) {
+      setI1(gl, passes.fxaa.program, passes.fxaa.uniforms, 'fxaaQuality', params.fxaaQuality);
+    }
+  });
+
+  const msaaSamplesCtrl = gui.add(params, 'msaaSamples', {
+    '2x': 2,
+    '4x': 4,
+    '8x': 8,
+  }).name('MSAA采样').onChange(() => {
+    scheduleResizeNow('gui-msaa');
+  });
+
+  const taaFeedbackCtrl = gui.add(params, 'taaFeedback', 1, 20, 0.5).name('TAA反馈').onChange(() => {
+    if (passes.taaBlend) {
+      setF(gl, passes.taaBlend.program, passes.taaBlend.uniforms, 'taaFeedback', params.taaFeedback);
+    }
+  });
+  // Set initial visibility based on default antialias mode
+  const updateAAUIControls = (mode: AntialiasMode) => {
+    fxaaQualityCtrl.domElement.style.display = mode === 'fxaa' ? '' : 'none';
+    msaaSamplesCtrl.domElement.style.display = mode === 'taa' ? '' : 'none';
+    taaFeedbackCtrl.domElement.style.display = mode === 'taa' ? '' : 'none';
+  };
+  updateAAUIControls(params.antialias);
 
   const bodyFolders: GUI[] = [];
   function syncBodyFolders(): void {
@@ -584,6 +980,49 @@ async function main(): Promise<void> {
   gui.add(params, 'gravatationalLensing');
   gui.add(params, 'renderBlackHole');
   gui.add(params, 'mouseControl');
+  gui.add(params, 'gestureMode', {
+    '关闭': 'off',
+    '本地计算': 'local',
+    '服务器计算': 'server',
+  }).name('手势识别').onChange(() => {
+    const modeSwitchToken = ++gestureInitToken;
+    gestureSwitchQueue = gestureSwitchQueue
+      .then(async () => {
+        if (modeSwitchToken !== gestureInitToken) return;
+        const targetMode = params.gestureMode;
+        if (targetMode === previousGestureMode && targetMode !== 'off') return;
+
+        if (targetMode === 'off') {
+          cleanupGestureResources(true);
+          previousGestureMode = 'off';
+          return;
+        }
+
+        cleanupGestureResources(true);
+        const success = await initHandGesture(targetMode);
+        const isStaleSwitch = modeSwitchToken !== gestureInitToken || params.gestureMode !== targetMode;
+        if (isStaleSwitch) {
+          cleanupGestureResources(true);
+          return;
+        }
+
+        if (!success) {
+          cleanupGestureResources(true);
+          previousGestureMode = 'off';
+          return;
+        }
+
+        previousGestureMode = targetMode;
+        if (targetMode === 'server' && serverGestureClient) {
+          serverGestureClient.enable();
+        } else if (targetMode === 'local' && handGestureController) {
+          handGestureController.setEnabled(true);
+        }
+      })
+      .catch((error) => {
+        console.error('[blackhole-web] 手势模式切换错误:', error);
+      });
+  });
   gui.add(params, 'cameraRoll', -180, 180);
   gui.add(params, 'frontView');
   gui.add(params, 'topView');
@@ -817,11 +1256,12 @@ async function main(): Promise<void> {
     }
   }
 
-  function frame(now: number): void {
-    requestAnimationFrame(frame);
-    const time = now / 1000;
-    if (!pipeline) return;
+  async function frame(now: number): Promise<void> {
+    try {
+      const time = now / 1000;
+      if (!pipeline) return;
 
+<<<<<<< HEAD
     // 回放模式不进行物理模拟
     if (!recordingManager.isPlayback) {
       stepScene(scene);
@@ -883,65 +1323,108 @@ async function main(): Promise<void> {
     }
 
     ambientAudio.update(scene, time);
+=======
+      await updateHandGesture();
+>>>>>>> 69d6d5732d47e7befa04897b0c9a42ab9fccdb2c
 
-    if (scene.showTrails) {
-      for (let bi = 0; bi < scene.bodyCount; bi++) {
-        const b = scene.bodies[bi]!;
-        trails.push(bi, b.position[0], b.position[1], b.position[2]);
+      stepScene(scene);
+
+      if (scene.showTrails) {
+        for (let bi = 0; bi < scene.bodyCount; bi++) {
+          const b = scene.bodies[bi]!;
+          trails.push(bi, b.position[0], b.position[1], b.position[2]);
+        }
       }
-    }
 
-    const { width: rw, height: rh, main, brightness, down, up, bloomFinal, tonemapped } =
-      pipeline;
-    const n = params.bloomIterations;
+      const { width: rw, height: rh, main, mainMsaa, mainResolved, brightness, down, up, bloomFinal, taaBuffers, tonemapped, output } =
+        pipeline;
+      const n = params.bloomIterations;
+      const aaMode = activeAntialiasMode;
 
-    drawPass(gl, vao, passes.blackhole, main.fbo, rw, rh, time, () => {
-      const p = passes.blackhole;
-      setF(gl, p.program, p.uniforms, 'mouseX', mouseX);
-      setF(gl, p.program, p.uniforms, 'mouseY', mouseY);
-      setI1(gl, p.program, p.uniforms, 'colorMap', 0);
-      setI1(gl, p.program, p.uniforms, 'galaxy', 1);
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, colorMap);
-      gl.activeTexture(gl.TEXTURE1);
-      gl.bindTexture(gl.TEXTURE_CUBE_MAP, galaxy);
+      const sceneTargetFbo = mainMsaa ? mainMsaa.fbo : main.fbo;
+      drawPass(gl, vao, passes.blackhole, sceneTargetFbo, rw, rh, time, () => {
+        const p = passes.blackhole;
+        setF(gl, p.program, p.uniforms, 'mouseX', mouseX);
+        setF(gl, p.program, p.uniforms, 'mouseY', mouseY);
+        setI1(gl, p.program, p.uniforms, 'colorMap', 0);
+        setI1(gl, p.program, p.uniforms, 'galaxy', 1);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, colorMap);
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_CUBE_MAP, galaxy);
 
-      setF(gl, p.program, p.uniforms, 'fovScale', 1);
-      setF(gl, p.program, p.uniforms, 'gravatationalLensing', params.gravatationalLensing ? 1 : 0);
-      setF(gl, p.program, p.uniforms, 'renderBlackHole', params.renderBlackHole ? 1 : 0);
-      setF(gl, p.program, p.uniforms, 'mouseControl', params.mouseControl ? 1 : 0);
-      setF(gl, p.program, p.uniforms, 'cameraRoll', params.cameraRoll);
-      setF(gl, p.program, p.uniforms, 'frontView', params.frontView ? 1 : 0);
-      setF(gl, p.program, p.uniforms, 'topView', params.topView ? 1 : 0);
-      setF(gl, p.program, p.uniforms, 'adiskEnabled', params.adiskEnabled ? 1 : 0);
-      setF(gl, p.program, p.uniforms, 'adiskParticle', params.adiskParticle ? 1 : 0);
-      setF(gl, p.program, p.uniforms, 'adiskDensityV', params.adiskDensityV);
-      setF(gl, p.program, p.uniforms, 'adiskDensityH', params.adiskDensityH);
-      setF(gl, p.program, p.uniforms, 'adiskHeight', params.adiskHeight);
-      setF(gl, p.program, p.uniforms, 'adiskLit', params.adiskLit);
-      setF(gl, p.program, p.uniforms, 'adiskNoiseLOD', params.adiskNoiseLOD);
-      setF(gl, p.program, p.uniforms, 'adiskNoiseScale', params.adiskNoiseScale);
-      
-      // 应用时间缩放到吸积盘流动速度
-      let effectiveAdiskSpeed = params.adiskSpeed;
-      if (scene.timeWarp.enabled && scene.bodyCount >= 1) {
-        const b0 = scene.bodies[0]!;
-        // 计算吸积盘中心附近的时间缩放因子（距离为黑洞半径的2倍处）
-        const refDist = b0.visual.size * 2;
-        const refPos: [number, number, number] = [b0.position[0] + refDist, b0.position[1], b0.position[2]];
-        const timeWarpFactor = calculateTimeWarp(refPos, b0.position, b0.mass, scene);
-        effectiveAdiskSpeed *= timeWarpFactor;
+        setF(gl, p.program, p.uniforms, 'fovScale', 1);
+        setF(gl, p.program, p.uniforms, 'gravatationalLensing', params.gravatationalLensing ? 1 : 0);
+        setF(gl, p.program, p.uniforms, 'renderBlackHole', params.renderBlackHole ? 1 : 0);
+        setF(gl, p.program, p.uniforms, 'mouseControl', params.mouseControl ? 1 : 0);
+        setF(gl, p.program, p.uniforms, 'cameraRoll', params.cameraRoll);
+        setF(gl, p.program, p.uniforms, 'frontView', params.frontView ? 1 : 0);
+        setF(gl, p.program, p.uniforms, 'topView', params.topView ? 1 : 0);
+        setF(gl, p.program, p.uniforms, 'adiskEnabled', params.adiskEnabled ? 1 : 0);
+        setF(gl, p.program, p.uniforms, 'adiskParticle', params.adiskParticle ? 1 : 0);
+        setF(gl, p.program, p.uniforms, 'adiskDensityV', params.adiskDensityV);
+        setF(gl, p.program, p.uniforms, 'adiskDensityH', params.adiskDensityH);
+        setF(gl, p.program, p.uniforms, 'adiskHeight', params.adiskHeight);
+        setF(gl, p.program, p.uniforms, 'adiskLit', params.adiskLit);
+        setF(gl, p.program, p.uniforms, 'adiskNoiseLOD', params.adiskNoiseLOD);
+        setF(gl, p.program, p.uniforms, 'adiskNoiseScale', params.adiskNoiseScale);
+
+        let effectiveAdiskSpeed = params.adiskSpeed;
+        if (scene.timeWarp.enabled && scene.bodyCount >= 1) {
+          const b0 = scene.bodies[0]!;
+          const refDist = b0.visual.size * 2;
+          const refPos: [number, number, number] = [b0.position[0] + refDist, b0.position[1], b0.position[2]];
+          const centralPotentialSource = scene.dynamics === 'kepler' ? scene.gmCentral : b0.mass;
+          const timeWarpFactor = calculateTimeWarp(refPos, b0.position, centralPotentialSource, scene);
+          effectiveAdiskSpeed *= timeWarpFactor;
+        }
+        setF(gl, p.program, p.uniforms, 'adiskSpeed', effectiveAdiskSpeed);
+
+        bindSceneUniforms(gl, p, scene);
+      });
+
+      let sceneTex = (() => {
+      if (mainMsaa && mainResolved) {
+        resolveMSAA(gl, mainMsaa, mainResolved, rw, rh);
+        return mainResolved.texture;
       }
-      setF(gl, p.program, p.uniforms, 'adiskSpeed', effectiveAdiskSpeed);
+      return main.texture;
+      })();
 
-      bindSceneUniforms(gl, p, scene);
-    });
-
+      if (aaMode === 'taa' && taaBuffers) {
+        const readIdx = taaIdx % 2;
+        const writeIdx = 1 - readIdx;
+        if (firstFrame) {
+          gl.bindFramebuffer(gl.READ_FRAMEBUFFER, mainMsaa ? mainResolved!.fbo : main.fbo);
+          gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, taaBuffers[0].fbo);
+          gl.blitFramebuffer(0, 0, rw, rh, 0, 0, rw, rh, gl.COLOR_BUFFER_BIT, gl.LINEAR);
+          gl.bindFramebuffer(gl.READ_FRAMEBUFFER, mainMsaa ? mainResolved!.fbo : main.fbo);
+          gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, taaBuffers[1].fbo);
+          gl.blitFramebuffer(0, 0, rw, rh, 0, 0, rw, rh, gl.COLOR_BUFFER_BIT, gl.LINEAR);
+          gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+          gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+          taaIdx = 1;
+        } else {
+          drawPass(gl, vao, passes.taaBlend, taaBuffers[writeIdx].fbo, rw, rh, time, () => {
+            const p = passes.taaBlend;
+            setI1(gl, p.program, p.uniforms, 'texture0', 0);
+            setI1(gl, p.program, p.uniforms, 'texture1', 1);
+            setF(gl, p.program, p.uniforms, 'firstFrame', 0.0);
+            setF(gl, p.program, p.uniforms, 'taaFeedback', params.taaFeedback);
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, sceneTex);
+            gl.activeTexture(gl.TEXTURE1);
+            gl.bindTexture(gl.TEXTURE_2D, taaBuffers[readIdx].texture);
+          });
+          taaIdx++;
+        }
+        sceneTex = taaBuffers[firstFrame ? 0 : ((taaIdx - 1) % 2)].texture;
+      }
     drawPass(gl, vao, passes.bloomBright, brightness.fbo, rw, rh, time, () => {
       const p = passes.bloomBright;
       setI1(gl, p.program, p.uniforms, 'texture0', 0);
       gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, main.texture);
+      gl.bindTexture(gl.TEXTURE_2D, sceneTex);
     });
 
     for (let level = 0; level < n; level++) {
@@ -980,7 +1463,7 @@ async function main(): Promise<void> {
       setF(gl, p.program, p.uniforms, 'tone', 1);
       setF(gl, p.program, p.uniforms, 'bloomStrength', params.bloomStrength);
       gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, main.texture);
+      gl.bindTexture(gl.TEXTURE_2D, sceneTex);
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D, up[0].texture);
     });
@@ -994,15 +1477,35 @@ async function main(): Promise<void> {
       gl.bindTexture(gl.TEXTURE_2D, bloomFinal.texture);
     });
 
+    const aaInputTex = tonemapped.texture;
+    if (aaMode === 'fxaa') {
+      drawPass(gl, vao, passes.fxaa, output.fbo, rw, rh, time, () => {
+        setI1(gl, passes.fxaa.program, passes.fxaa.uniforms, 'texture0', 0);
+        setI1(gl, passes.fxaa.program, passes.fxaa.uniforms, 'fxaaQuality', params.fxaaQuality);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, aaInputTex);
+      });
+    } else {
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, tonemapped.fbo);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, output.fbo);
+      gl.blitFramebuffer(0, 0, rw, rh, 0, 0, rw, rh, gl.COLOR_BUFFER_BIT, gl.LINEAR);
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+    }
+
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, canvas.width, canvas.height);
     drawPass(gl, vao, passes.passthrough, null, canvas.width, canvas.height, time, () => {
       setI1(gl, passes.passthrough.program, passes.passthrough.uniforms, 'texture0', 0);
       gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, tonemapped.texture);
+      gl.bindTexture(gl.TEXTURE_2D, output.texture);
     });
 
-    drawTrails(time);
+      drawTrails(time);
+      firstFrame = false;
+    } finally {
+      requestAnimationFrame(frame);
+    }
   }
 
   requestAnimationFrame(frame);
