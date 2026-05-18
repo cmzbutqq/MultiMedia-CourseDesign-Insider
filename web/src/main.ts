@@ -1261,7 +1261,6 @@ async function main(): Promise<void> {
       const time = now / 1000;
       if (!pipeline) return;
 
-<<<<<<< HEAD
     // 回放模式不进行物理模拟
     if (!recordingManager.isPlayback) {
       stepScene(scene);
@@ -1323,9 +1322,7 @@ async function main(): Promise<void> {
     }
 
     ambientAudio.update(scene, time);
-=======
       await updateHandGesture();
->>>>>>> 69d6d5732d47e7befa04897b0c9a42ab9fccdb2c
 
       stepScene(scene);
 
