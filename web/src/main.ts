@@ -1261,70 +1261,63 @@ async function main(): Promise<void> {
       const time = now / 1000;
       if (!pipeline) return;
 
-    // 回放模式不进行物理模拟
-    if (!recordingManager.isPlayback) {
-      stepScene(scene);
-    }
-
-    // 录制当前帧（如果正在录制）
-    const cam = getCameraLookBasis(
-      time,
-      mouseX,
-      mouseY,
-      gl.canvas.clientWidth,
-      gl.canvas.clientHeight,
-      params.mouseControl,
-      params.frontView,
-      params.topView,
-      params.cameraRoll,
-    );
-    recordingManager.recordFrame(
-      time,
-      cam.cameraPos,
-      params.cameraRoll,
-      params.mouseControl,
-      params.frontView,
-      params.topView,
-      mouseX,
-      mouseY,
-      scene,
-      params,
-    );
-
-    // 回放模式：应用回放帧数据
-    const playbackFrame = recordingManager.getPlaybackFrame();
-    if (playbackFrame) {
-      // 仅在进度变化时输出调试信息（避免每帧都输出）
-      if (Math.random() < 0.02) {
-        console.log(`📹 回放帧: ${recordingManager.getPlaybackProgress().toFixed(2)}% - bodies:${playbackFrame.scene.bodyCount}`);
+      const playbackFrame = recordingManager.getPlaybackFrame();
+      if (playbackFrame) {
+        // 仅在进度变化时输出调试信息（避免每帧都输出）
+        if (Math.random() < 0.02) {
+          console.log(`📹 回放帧: ${recordingManager.getPlaybackProgress().toFixed(2)}% - bodies:${playbackFrame.scene.bodyCount}`);
+        }
+        Object.assign(params, {
+          cameraRoll: playbackFrame.camera.roll,
+          mouseControl: playbackFrame.camera.mouseControl,
+          frontView: playbackFrame.camera.frontView,
+          topView: playbackFrame.camera.topView,
+        });
+        mouseX = playbackFrame.camera.mouseX ?? 0;
+        mouseY = playbackFrame.camera.mouseY ?? 0;
+        applySceneState(scene, playbackFrame.scene);
+        Object.assign(params, playbackFrame.render);
+        gui.controllersRecursive().forEach((c) => c.updateDisplay());
+      } else {
+        await updateHandGesture();
+        stepScene(scene);
       }
-      Object.assign(params, {
-        cameraRoll: playbackFrame.camera.roll,
-        mouseControl: playbackFrame.camera.mouseControl,
-        frontView: playbackFrame.camera.frontView,
-        topView: playbackFrame.camera.topView,
-      });
-      mouseX = playbackFrame.camera.mouseX ?? 0;
-      mouseY = playbackFrame.camera.mouseY ?? 0;
-      applySceneState(scene, playbackFrame.scene);
-      Object.assign(params, playbackFrame.render);
-      gui.controllersRecursive().forEach((c) => c.updateDisplay());
-    }
 
-    // 每帧同步录制 UI 状态
-    const recStatus = recordingManager.getStatus();
-    recordingState.frameCount = recStatus.frameCount;
-    recordingState.playbackProgress = recStatus.playbackProgress;
-    if (recStatus.isRecording) {
-      recordingState.status = `录制中... ${recStatus.frameCount}帧 / ${recStatus.duration.toFixed(1)}s`;
-    } else if (recStatus.isPlayback) {
-      recordingState.status = `回放中... ${(recStatus.playbackProgress * 100).toFixed(0)}%`;
-    }
+      const cam = getCameraLookBasis(
+        time,
+        mouseX,
+        mouseY,
+        canvas.clientWidth,
+        canvas.clientHeight,
+        params.mouseControl,
+        params.frontView,
+        params.topView,
+        params.cameraRoll,
+      );
+      recordingManager.recordFrame(
+        time,
+        cam.cameraPos,
+        params.cameraRoll,
+        params.mouseControl,
+        params.frontView,
+        params.topView,
+        mouseX,
+        mouseY,
+        scene,
+        params,
+      );
 
-    ambientAudio.update(scene, time);
-      await updateHandGesture();
+      // 每帧同步录制 UI 状态
+      const recStatus = recordingManager.getStatus();
+      recordingState.frameCount = recStatus.frameCount;
+      recordingState.playbackProgress = recStatus.playbackProgress;
+      if (recStatus.isRecording) {
+        recordingState.status = `录制中... ${recStatus.frameCount}帧 / ${recStatus.duration.toFixed(1)}s`;
+      } else if (recStatus.isPlayback) {
+        recordingState.status = `回放中... ${(recStatus.playbackProgress * 100).toFixed(0)}%`;
+      }
 
-      stepScene(scene);
+      ambientAudio.update(scene);
 
       if (scene.showTrails) {
         for (let bi = 0; bi < scene.bodyCount; bi++) {

@@ -228,7 +228,7 @@ export class AmbientAudioEngine {
     }
   }
 
-  update(scene: SceneState, time: number): void {
+  update(scene: SceneState): void {
     if (!this.enabled || !this.ctx) return;
 
     let blackHoleCount = 0;

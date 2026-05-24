@@ -62,6 +62,7 @@ export class RecordingManager {
   startRecording(): void {
     this.frames = [];
     this.isRecording = true;
+    this.isPlayback = false;
     this.timeOrigin = -1; // 用首帧 time 作为基准（见 recordFrame）
     this.lastRecordTime = -this.frameInterval; // 确保第一帧被录入
     console.log('🎬 录制已开始');
@@ -144,6 +145,7 @@ export class RecordingManager {
       console.warn('⚠️ 没有录制数据');
       return;
     }
+    this.isRecording = false;
     this.isPlayback = true;
     this.playbackStartTime = Date.now() / 1000;
     console.log('▶️ 回放已开始');
@@ -206,6 +208,7 @@ export class RecordingManager {
 
     const elapsed = Date.now() / 1000 - this.playbackStartTime;
     const totalDuration = this.frames[this.frames.length - 1]!.timestamp;
+    if (totalDuration <= 0) return this.isPlayback ? 1 : 0;
 
     return Math.min(1, elapsed / totalDuration);
   }
@@ -217,6 +220,7 @@ export class RecordingManager {
     if (this.frames.length === 0) return;
 
     const totalDuration = this.frames[this.frames.length - 1]!.timestamp;
+    if (totalDuration <= 0) return;
     const targetTime = progress * totalDuration;
 
     // 调整playbackStartTime使得elapsed时间对应目标时间
