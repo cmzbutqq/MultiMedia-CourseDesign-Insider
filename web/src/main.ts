@@ -1083,8 +1083,9 @@ async function main(): Promise<void> {
             applySceneState(scene, cloneSceneState(initialSnapshot));
             trails.reset();
           }
-          recordingManager.startPlayback();
-          recordingState.status = '回放中...';
+          recordingState.status = recordingManager.startPlayback()
+            ? '回放中...'
+            : '没有录制数据';
         },
       },
       'startPlayback',
@@ -1211,7 +1212,7 @@ async function main(): Promise<void> {
       ambientAudio.setVolume(v);
     });
 
-  function drawTrails(time: number): void {
+  function drawTrails(time: number, cameraPosOverride?: [number, number, number]): void {
     if (!trailCanvas || !trailCtx) return;
     const w = trailCanvas.width;
     const h = trailCanvas.height;
@@ -1228,6 +1229,7 @@ async function main(): Promise<void> {
       params.frontView,
       params.topView,
       params.cameraRoll,
+      cameraPosOverride,
     );
 
     for (let bi = 0; bi < scene.bodyCount; bi++) {
@@ -1295,6 +1297,7 @@ async function main(): Promise<void> {
         params.frontView,
         params.topView,
         params.cameraRoll,
+        playbackFrame?.camera.position,
       );
       recordingManager.recordFrame(
         time,
@@ -1352,6 +1355,16 @@ async function main(): Promise<void> {
         setF(gl, p.program, p.uniforms, 'cameraRoll', params.cameraRoll);
         setF(gl, p.program, p.uniforms, 'frontView', params.frontView ? 1 : 0);
         setF(gl, p.program, p.uniforms, 'topView', params.topView ? 1 : 0);
+        setF(gl, p.program, p.uniforms, 'playbackCamera', playbackFrame ? 1 : 0);
+        setV3(
+          gl,
+          p.program,
+          p.uniforms,
+          'playbackCameraPos',
+          playbackFrame?.camera.position[0] ?? 0,
+          playbackFrame?.camera.position[1] ?? 0,
+          playbackFrame?.camera.position[2] ?? 0,
+        );
         setF(gl, p.program, p.uniforms, 'adiskEnabled', params.adiskEnabled ? 1 : 0);
         setF(gl, p.program, p.uniforms, 'adiskParticle', params.adiskParticle ? 1 : 0);
         setF(gl, p.program, p.uniforms, 'adiskDensityV', params.adiskDensityV);
@@ -1493,8 +1506,8 @@ async function main(): Promise<void> {
       gl.bindTexture(gl.TEXTURE_2D, output.texture);
     });
 
-      drawTrails(time);
-      firstFrame = false;
+    drawTrails(time, playbackFrame?.camera.position);
+    firstFrame = false;
     } finally {
       requestAnimationFrame(frame);
     }

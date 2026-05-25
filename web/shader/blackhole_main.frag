@@ -19,6 +19,8 @@ uniform sampler2D colorMap;
 uniform float frontView;
 uniform float topView;
 uniform float cameraRoll;
+uniform float playbackCamera;
+uniform vec3 playbackCameraPos;
 
 uniform float gravatationalLensing;
 uniform float renderBlackHole;
@@ -373,7 +375,9 @@ void main() {
   mat3 view;
 
   vec3 cameraPos;
-  if (mouseControl > 0.5) {
+  if (playbackCamera > 0.5) {
+    cameraPos = playbackCameraPos;
+  } else if (mouseControl > 0.5) {
     vec2 mouse = clamp(vec2(mouseX, mouseY) / resolution.xy, 0.0, 1.0) - 0.5;
     cameraPos = vec3(-cos(mouse.x * 10.0) * 15.0, mouse.y * 30.0,
                      sin(mouse.x * 10.0) * 15.0);

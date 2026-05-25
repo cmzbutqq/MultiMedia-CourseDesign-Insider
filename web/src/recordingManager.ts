@@ -25,6 +25,7 @@ const RENDER_NUMBER_FIELDS = [
 ] as const;
 
 const MAX_RECORDED_BLOOM_ITER = 8;
+const MAX_RECORDED_VECTOR_ABS = 10000;
 
 function isObject(value: unknown): value is JsonObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -46,6 +47,10 @@ function isVec3(value: unknown): value is [number, number, number] {
   return Array.isArray(value) && value.length === 3 && value.every(isFiniteNumber);
 }
 
+function isVec3Within(value: unknown, absMax: number): value is [number, number, number] {
+  return isVec3(value) && value.every((item) => Math.abs(item) <= absMax);
+}
+
 function isBodyKind(value: unknown): value is SceneState['bodies'][number]['kind'] {
   return typeof value === 'string' && BODY_KINDS.includes(value as (typeof BODY_KINDS)[number]);
 }
@@ -57,20 +62,20 @@ function isDynamicsMode(value: unknown): value is SceneState['dynamics'] {
 function isBodyVisual(value: unknown): value is SceneState['bodies'][number]['visual'] {
   return (
     isObject(value) &&
-    isFiniteNumber(value.size) &&
+    isNumberInRange(value.size, 0.05, 4) &&
     typeof value.glowColor === 'string' &&
-    isFiniteNumber(value.glowIntensity) &&
-    isFiniteNumber(value.adiskIntensity) &&
-    isFiniteNumber(value.distortionStrength)
+    isNumberInRange(value.glowIntensity, 0, 8) &&
+    isNumberInRange(value.adiskIntensity, 0, 3) &&
+    isNumberInRange(value.distortionStrength, 0, 3)
   );
 }
 
 function isSceneBody(value: unknown): value is SceneState['bodies'][number] {
   return (
     isObject(value) &&
-    isVec3(value.position) &&
-    isVec3(value.velocity) &&
-    isFiniteNumber(value.mass) &&
+    isVec3Within(value.position, MAX_RECORDED_VECTOR_ABS) &&
+    isVec3Within(value.velocity, MAX_RECORDED_VECTOR_ABS) &&
+    isNumberInRange(value.mass, 0.01, 80) &&
     isBodyKind(value.kind) &&
     isBodyVisual(value.visual)
   );
@@ -98,10 +103,10 @@ function isSceneState(value: unknown): value is SceneState {
     value.bodies.length >= MAX_BODIES &&
     value.bodies.slice(0, MAX_BODIES).every(isSceneBody) &&
     isDynamicsMode(value.dynamics) &&
-    isFiniteNumber(value.gmCentral) &&
-    isFiniteNumber(value.nbodyG) &&
-    isFiniteNumber(value.softening) &&
-    isFiniteNumber(value.dt) &&
+    isNumberInRange(value.gmCentral, 1, 500) &&
+    isNumberInRange(value.nbodyG, 0.1, 20) &&
+    isNumberInRange(value.softening, 0.01, 2) &&
+    isNumberInRange(value.dt, 0.001, 0.1) &&
     typeof value.showTrails === 'boolean' &&
     isTimeWarp(value.timeWarp)
   );
@@ -344,15 +349,16 @@ export class RecordingManager {
   /**
    * 开始回放
    */
-  startPlayback(): void {
+  startPlayback(): boolean {
     if (this.frames.length === 0) {
       console.warn('⚠️ 没有录制数据');
-      return;
+      return false;
     }
     this.isRecording = false;
     this.isPlayback = true;
     this.playbackStartTime = Date.now() / 1000;
     console.log('▶️ 回放已开始');
+    return true;
   }
 
   /**
@@ -460,6 +466,11 @@ export class RecordingManager {
         return false;
       }
       this.frames = frames;
+      this.isRecording = false;
+      this.isPlayback = false;
+      this.playbackStartTime = 0;
+      this.timeOrigin = -1;
+      this.lastRecordTime = -this.frameInterval;
       console.log(`✅ 导入 ${this.frames.length} 帧数据`);
       return true;
     } catch (e) {

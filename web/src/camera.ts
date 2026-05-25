@@ -16,6 +16,7 @@ export function getCameraLookBasis(
   frontView: boolean,
   topView: boolean,
   cameraRollDeg: number,
+  cameraPosOverride?: [number, number, number],
 ): {
   cameraPos: [number, number, number];
   uu: [number, number, number];
@@ -23,7 +24,9 @@ export function getCameraLookBasis(
   ww: [number, number, number];
 } {
   let cameraPos: [number, number, number];
-  if (mouseControl) {
+  if (cameraPosOverride) {
+    cameraPos = [...cameraPosOverride];
+  } else if (mouseControl) {
     const mx = Math.max(0, Math.min(1, mouseX / resolutionX)) - 0.5;
     const my = Math.max(0, Math.min(1, mouseY / resolutionY)) - 0.5;
     cameraPos = [-Math.cos(mx * 10) * 15, my * 30, Math.sin(mx * 10) * 15];
@@ -84,5 +87,6 @@ export function worldToScreenPx(
   const px = width * 0.5 + puvX * height;
   // Canvas2D 的 y 轴向下，需将相机空间 y 投影翻转到屏幕坐标。
   const py = height * (0.5 - puvY);
+  if (!Number.isFinite(px) || !Number.isFinite(py)) return null;
   return { x: px, y: py };
 }
