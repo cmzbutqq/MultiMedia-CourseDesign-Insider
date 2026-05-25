@@ -37,9 +37,6 @@ import {
 import { recordingManager } from './recordingManager.js';
 import { ambientAudio } from './ambientAudio.js';
 
-// 暴露到全局作用域以便在控制台调试
-(window as any).recordingManager = recordingManager;
-
 function showStartupError(message: string): void {
   document.body.innerHTML = '';
   const pre = document.createElement('pre');
@@ -1289,10 +1286,6 @@ async function main(): Promise<void> {
 
       const playbackFrame = recordingManager.getPlaybackFrame();
       if (playbackFrame) {
-        // 仅在进度变化时输出调试信息（避免每帧都输出）
-        if (Math.random() < 0.02) {
-          console.log(`📹 回放帧: ${recordingManager.getPlaybackProgress().toFixed(2)}% - bodies:${playbackFrame.scene.bodyCount}`);
-        }
         Object.assign(params, {
           cameraRoll: playbackFrame.camera.roll,
           mouseControl: playbackFrame.camera.mouseControl,

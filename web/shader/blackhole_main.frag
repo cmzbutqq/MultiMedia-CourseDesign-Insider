@@ -150,7 +150,7 @@ vec3 panoramaColor(sampler2D tex, vec3 dir) {
 }
 
 vec3 accel(float h2, vec3 pos) {
-  float r2 = dot(pos, pos);
+  float r2 = max(dot(pos, pos), EPSILON * EPSILON);
   float r5 = pow(r2, 2.5);
   return -1.5 * h2 * pos / r5 * 1.0;
 }

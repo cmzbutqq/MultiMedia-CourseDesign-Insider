@@ -189,11 +189,27 @@ function copySceneState(scene: SceneState): SceneState {
   };
 }
 
+function isCameraClearOfActiveBodies(frame: RecordingFrame): boolean {
+  for (let i = 0; i < frame.scene.bodyCount; i++) {
+    const body = frame.scene.bodies[i]!;
+    const dx = frame.camera.position[0] - body.position[0];
+    const dy = frame.camera.position[1] - body.position[1];
+    const dz = frame.camera.position[2] - body.position[2];
+    if (Math.hypot(dx, dy, dz) <= Math.max(body.visual.size, MIN_CAMERA_DISTANCE)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function parseRecordingFrames(data: unknown): RecordingFrame[] | null {
   if (!isObject(data) || !Array.isArray(data.frames) || data.frames.length > MAX_RECORDING_FRAMES) {
     return null;
   }
   if (!data.frames.every(isRecordingFrame)) {
+    return null;
+  }
+  if (!data.frames.every(isCameraClearOfActiveBodies)) {
     return null;
   }
   for (let i = 1; i < data.frames.length; i++) {
