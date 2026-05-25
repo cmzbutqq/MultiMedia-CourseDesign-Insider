@@ -19,9 +19,12 @@ const RENDER_NUMBER_FIELDS = [
   'adiskNoiseLOD',
   'adiskNoiseScale',
   'adiskSpeed',
+  'bloomIterations',
   'bloomStrength',
   'gamma',
 ] as const;
+
+const MAX_RECORDED_BLOOM_ITER = 8;
 
 function isObject(value: unknown): value is JsonObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -29,6 +32,14 @@ function isObject(value: unknown): value is JsonObject {
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
+}
+
+function isNumberInRange(value: unknown, min: number, max: number): value is number {
+  return isFiniteNumber(value) && value >= min && value <= max;
+}
+
+function isIntegerInRange(value: unknown, min: number, max: number): value is number {
+  return Number.isInteger(value) && typeof value === 'number' && value >= min && value <= max;
 }
 
 function isVec3(value: unknown): value is [number, number, number] {
@@ -69,9 +80,9 @@ function isTimeWarp(value: unknown): value is SceneState['timeWarp'] {
   return (
     isObject(value) &&
     typeof value.enabled === 'boolean' &&
-    isFiniteNumber(value.intensity) &&
-    isFiniteNumber(value.potentialScale) &&
-    isFiniteNumber(value.distanceScale)
+    isNumberInRange(value.intensity, 0, 1) &&
+    isNumberInRange(value.potentialScale, 0.1, 5) &&
+    isNumberInRange(value.distanceScale, 0.5, 20)
   );
 }
 
@@ -81,7 +92,7 @@ function isSceneState(value: unknown): value is SceneState {
   return (
     Number.isInteger(bodyCount) &&
     typeof bodyCount === 'number' &&
-    bodyCount >= 0 &&
+    bodyCount >= 1 &&
     bodyCount <= MAX_BODIES &&
     Array.isArray(value.bodies) &&
     value.bodies.length >= MAX_BODIES &&
@@ -100,7 +111,17 @@ function isRenderState(value: unknown): value is RecordingFrame['render'] {
   return (
     isObject(value) &&
     RENDER_BOOLEAN_FIELDS.every((field) => typeof value[field] === 'boolean') &&
-    RENDER_NUMBER_FIELDS.every((field) => isFiniteNumber(value[field]))
+    RENDER_NUMBER_FIELDS.every((field) => isFiniteNumber(value[field])) &&
+    isNumberInRange(value.adiskDensityV, 0, 10) &&
+    isNumberInRange(value.adiskDensityH, 0, 10) &&
+    isNumberInRange(value.adiskHeight, 0, 1) &&
+    isNumberInRange(value.adiskLit, 0, 4) &&
+    isIntegerInRange(value.adiskNoiseLOD, 1, 12) &&
+    isNumberInRange(value.adiskNoiseScale, 0, 10) &&
+    isNumberInRange(value.adiskSpeed, 0, 1) &&
+    isIntegerInRange(value.bloomIterations, 1, MAX_RECORDED_BLOOM_ITER) &&
+    isNumberInRange(value.bloomStrength, 0, 1) &&
+    isNumberInRange(value.gamma, 1, 4)
   );
 }
 
@@ -128,14 +149,40 @@ function parseRecordingFrames(data: unknown): RecordingFrame[] | null {
   if (!data.frames.every(isRecordingFrame)) {
     return null;
   }
+  for (let i = 1; i < data.frames.length; i++) {
+    if (data.frames[i]!.timestamp < data.frames[i - 1]!.timestamp) {
+      return null;
+    }
+  }
   return data.frames.map((frame) => ({
-    ...frame,
+    timestamp: frame.timestamp,
     camera: {
-      ...frame.camera,
       position: [...frame.camera.position],
+      roll: frame.camera.roll,
+      mouseControl: frame.camera.mouseControl,
+      frontView: frame.camera.frontView,
+      topView: frame.camera.topView,
+      mouseX: frame.camera.mouseX,
+      mouseY: frame.camera.mouseY,
     },
     scene: cloneSceneState(frame.scene),
-    render: { ...frame.render },
+    render: {
+      gravatationalLensing: frame.render.gravatationalLensing,
+      renderBlackHole: frame.render.renderBlackHole,
+      adiskEnabled: frame.render.adiskEnabled,
+      adiskParticle: frame.render.adiskParticle,
+      adiskDensityV: frame.render.adiskDensityV,
+      adiskDensityH: frame.render.adiskDensityH,
+      adiskHeight: frame.render.adiskHeight,
+      adiskLit: frame.render.adiskLit,
+      adiskNoiseLOD: frame.render.adiskNoiseLOD,
+      adiskNoiseScale: frame.render.adiskNoiseScale,
+      adiskSpeed: frame.render.adiskSpeed,
+      bloomIterations: frame.render.bloomIterations,
+      bloomStrength: frame.render.bloomStrength,
+      tonemappingEnabled: frame.render.tonemappingEnabled,
+      gamma: frame.render.gamma,
+    },
   }));
 }
 
@@ -173,6 +220,7 @@ export interface RecordingFrame {
     adiskNoiseLOD: number;
     adiskNoiseScale: number;
     adiskSpeed: number;
+    bloomIterations: number;
     bloomStrength: number;
     tonemappingEnabled: boolean;
     gamma: number;
@@ -240,6 +288,7 @@ export class RecordingManager {
       adiskNoiseLOD: number;
       adiskNoiseScale: number;
       adiskSpeed: number;
+      bloomIterations: number;
       bloomStrength: number;
       tonemappingEnabled: boolean;
       gamma: number;
@@ -270,7 +319,23 @@ export class RecordingManager {
         mouseY,
       },
       scene: cloneSceneState(scene),
-      render: { ...params },
+      render: {
+        gravatationalLensing: params.gravatationalLensing,
+        renderBlackHole: params.renderBlackHole,
+        adiskEnabled: params.adiskEnabled,
+        adiskParticle: params.adiskParticle,
+        adiskDensityV: params.adiskDensityV,
+        adiskDensityH: params.adiskDensityH,
+        adiskHeight: params.adiskHeight,
+        adiskLit: params.adiskLit,
+        adiskNoiseLOD: params.adiskNoiseLOD,
+        adiskNoiseScale: params.adiskNoiseScale,
+        adiskSpeed: params.adiskSpeed,
+        bloomIterations: params.bloomIterations,
+        bloomStrength: params.bloomStrength,
+        tonemappingEnabled: params.tonemappingEnabled,
+        gamma: params.gamma,
+      },
     };
 
     this.frames.push(frame);
@@ -407,8 +472,8 @@ export class RecordingManager {
    * 保存到localStorage
    */
   saveToLocalStorage(key: string = 'recording'): boolean {
-    const json = this.exportJSON();
     try {
+      const json = this.exportJSON();
       localStorage.setItem(key, json);
       console.log(`💾 已保存到localStorage (${(json.length / 1024).toFixed(1)} KB)`);
       return true;
