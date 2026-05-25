@@ -27,6 +27,9 @@ const RENDER_NUMBER_FIELDS = [
 const MAX_RECORDED_BLOOM_ITER = 8;
 const MAX_RECORDED_VECTOR_ABS = 10000;
 const MIN_CAMERA_DISTANCE = 0.001;
+const MAX_RECORDING_JSON_BYTES = 50 * 1024 * 1024;
+const MAX_RECORDING_FRAMES = 120000;
+const MAX_RECORDING_DURATION_SECONDS = 3600;
 
 function isObject(value: unknown): value is JsonObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -142,15 +145,14 @@ function isRenderState(value: unknown): value is RecordingFrame['render'] {
 function isRecordingFrame(value: unknown): value is RecordingFrame {
   if (!isObject(value) || !isObject(value.camera)) return false;
   return (
-    isFiniteNumber(value.timestamp) &&
-    value.timestamp >= 0 &&
+    isNumberInRange(value.timestamp, 0, MAX_RECORDING_DURATION_SECONDS) &&
     isCameraPosition(value.camera.position) &&
     isNumberInRange(value.camera.roll, -180, 180) &&
     typeof value.camera.mouseControl === 'boolean' &&
     typeof value.camera.frontView === 'boolean' &&
     typeof value.camera.topView === 'boolean' &&
-    isFiniteNumber(value.camera.mouseX) &&
-    isFiniteNumber(value.camera.mouseY) &&
+    isNumberInRange(value.camera.mouseX, 0, MAX_RECORDED_VECTOR_ABS) &&
+    isNumberInRange(value.camera.mouseY, 0, MAX_RECORDED_VECTOR_ABS) &&
     isSceneState(value.scene) &&
     isRenderState(value.render)
   );
@@ -188,7 +190,7 @@ function copySceneState(scene: SceneState): SceneState {
 }
 
 function parseRecordingFrames(data: unknown): RecordingFrame[] | null {
-  if (!isObject(data) || !Array.isArray(data.frames)) {
+  if (!isObject(data) || !Array.isArray(data.frames) || data.frames.length > MAX_RECORDING_FRAMES) {
     return null;
   }
   if (!data.frames.every(isRecordingFrame)) {
@@ -500,6 +502,10 @@ export class RecordingManager {
    */
   importJSON(jsonString: string): boolean {
     try {
+      if (jsonString.length > MAX_RECORDING_JSON_BYTES) {
+        console.error('❌ JSON文件过大');
+        return false;
+      }
       const data = JSON.parse(jsonString);
       const frames = parseRecordingFrames(data);
       if (!frames) {

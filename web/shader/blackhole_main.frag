@@ -241,7 +241,7 @@ void adiskColor(vec3 posWorld, inout vec3 color, inout float alpha) {
   vec3 pos = posWorld - adiskOrigin;
   float innerRadius = 2.6 * adiskDiskSize;
   float outerRadius = 12.0 * adiskDiskSize;
-  float hDisk = adiskHeight * adiskDiskSize;
+  float hDisk = max(adiskHeight * adiskDiskSize, EPSILON);
 
   float density = max(
       0.0, 1.0 - length(pos.xyz / vec3(outerRadius, hDisk, outerRadius)));
