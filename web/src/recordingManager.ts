@@ -26,6 +26,7 @@ const RENDER_NUMBER_FIELDS = [
 
 const MAX_RECORDED_BLOOM_ITER = 8;
 const MAX_RECORDED_VECTOR_ABS = 10000;
+const MIN_CAMERA_DISTANCE = 0.001;
 
 function isObject(value: unknown): value is JsonObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -51,6 +52,14 @@ function isVec3Within(value: unknown, absMax: number): value is [number, number,
   return isVec3(value) && value.every((item) => Math.abs(item) <= absMax);
 }
 
+function isCameraPosition(value: unknown): value is [number, number, number] {
+  return isVec3Within(value, MAX_RECORDED_VECTOR_ABS) && Math.hypot(...value) > MIN_CAMERA_DISTANCE;
+}
+
+function isHexColor(value: unknown): value is string {
+  return typeof value === 'string' && /^#[0-9a-fA-F]{6}$/.test(value);
+}
+
 function isBodyKind(value: unknown): value is SceneState['bodies'][number]['kind'] {
   return typeof value === 'string' && BODY_KINDS.includes(value as (typeof BODY_KINDS)[number]);
 }
@@ -63,7 +72,7 @@ function isBodyVisual(value: unknown): value is SceneState['bodies'][number]['vi
   return (
     isObject(value) &&
     isNumberInRange(value.size, 0.05, 4) &&
-    typeof value.glowColor === 'string' &&
+    isHexColor(value.glowColor) &&
     isNumberInRange(value.glowIntensity, 0, 8) &&
     isNumberInRange(value.adiskIntensity, 0, 3) &&
     isNumberInRange(value.distortionStrength, 0, 3)
@@ -135,7 +144,7 @@ function isRecordingFrame(value: unknown): value is RecordingFrame {
   return (
     isFiniteNumber(value.timestamp) &&
     value.timestamp >= 0 &&
-    isVec3(value.camera.position) &&
+    isCameraPosition(value.camera.position) &&
     isFiniteNumber(value.camera.roll) &&
     typeof value.camera.mouseControl === 'boolean' &&
     typeof value.camera.frontView === 'boolean' &&
@@ -414,6 +423,7 @@ export class RecordingManager {
    * 获取回放进度 (0-1)
    */
   getPlaybackProgress(): number {
+    if (!this.isPlayback) return 0;
     if (this.frames.length === 0) return 0;
 
     const elapsed = Date.now() / 1000 - this.playbackStartTime;

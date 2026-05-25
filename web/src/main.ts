@@ -1280,6 +1280,8 @@ async function main(): Promise<void> {
         mouseX = playbackFrame.camera.mouseX ?? 0;
         mouseY = playbackFrame.camera.mouseY ?? 0;
         applySceneState(scene, playbackFrame.scene);
+        syncUiSceneFromScene(uiScene, scene);
+        syncBodyFolders();
         Object.assign(params, playbackFrame.render);
         gui.controllersRecursive().forEach((c) => c.updateDisplay());
       } else {
