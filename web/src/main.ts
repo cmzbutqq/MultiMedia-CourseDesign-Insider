@@ -482,10 +482,11 @@ async function main(): Promise<void> {
   const scene: SceneState = createDefaultScene();
   let initialSnapshot = cloneSceneState(scene);
   const trails = new TrailBuffer();
+  const assetPath = (path: string): string => `${import.meta.env.BASE_URL}${path}`;
 
   const [galaxy, colorMap, vao, passes] = await Promise.all([
-    loadCubemap(gl, '/assets/skybox_nebula_dark'),
-    loadTexture2D(gl, '/assets/color_map.png'),
+    loadCubemap(gl, assetPath('assets/skybox_nebula_dark')),
+    loadTexture2D(gl, assetPath('assets/color_map.png')),
     Promise.resolve(createQuadVAO(gl)),
     Promise.resolve({
       blackhole: makePass(gl, simpleVert, blackholeMainFrag),
