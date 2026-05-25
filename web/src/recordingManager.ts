@@ -109,7 +109,7 @@ function isSceneState(value: unknown): value is SceneState {
     bodyCount >= 1 &&
     bodyCount <= MAX_BODIES &&
     Array.isArray(value.bodies) &&
-    value.bodies.length >= MAX_BODIES &&
+    value.bodies.length === MAX_BODIES &&
     value.bodies.slice(0, MAX_BODIES).every(isSceneBody) &&
     isDynamicsMode(value.dynamics) &&
     isNumberInRange(value.gmCentral, 1, 500) &&
@@ -145,7 +145,7 @@ function isRecordingFrame(value: unknown): value is RecordingFrame {
     isFiniteNumber(value.timestamp) &&
     value.timestamp >= 0 &&
     isCameraPosition(value.camera.position) &&
-    isFiniteNumber(value.camera.roll) &&
+    isNumberInRange(value.camera.roll, -180, 180) &&
     typeof value.camera.mouseControl === 'boolean' &&
     typeof value.camera.frontView === 'boolean' &&
     typeof value.camera.topView === 'boolean' &&
@@ -154,6 +154,37 @@ function isRecordingFrame(value: unknown): value is RecordingFrame {
     isSceneState(value.scene) &&
     isRenderState(value.render)
   );
+}
+
+function copySceneState(scene: SceneState): SceneState {
+  return {
+    bodyCount: scene.bodyCount,
+    bodies: scene.bodies.slice(0, MAX_BODIES).map((body) => ({
+      position: [...body.position],
+      velocity: [...body.velocity],
+      mass: body.mass,
+      kind: body.kind,
+      visual: {
+        size: body.visual.size,
+        glowColor: body.visual.glowColor,
+        glowIntensity: body.visual.glowIntensity,
+        adiskIntensity: body.visual.adiskIntensity,
+        distortionStrength: body.visual.distortionStrength,
+      },
+    })),
+    dynamics: scene.dynamics,
+    gmCentral: scene.gmCentral,
+    nbodyG: scene.nbodyG,
+    softening: scene.softening,
+    dt: scene.dt,
+    showTrails: scene.showTrails,
+    timeWarp: {
+      enabled: scene.timeWarp.enabled,
+      intensity: scene.timeWarp.intensity,
+      potentialScale: scene.timeWarp.potentialScale,
+      distanceScale: scene.timeWarp.distanceScale,
+    },
+  };
 }
 
 function parseRecordingFrames(data: unknown): RecordingFrame[] | null {
@@ -179,7 +210,7 @@ function parseRecordingFrames(data: unknown): RecordingFrame[] | null {
       mouseX: frame.camera.mouseX,
       mouseY: frame.camera.mouseY,
     },
-    scene: cloneSceneState(frame.scene),
+    scene: copySceneState(frame.scene),
     render: {
       gravatationalLensing: frame.render.gravatationalLensing,
       renderBlackHole: frame.render.renderBlackHole,
