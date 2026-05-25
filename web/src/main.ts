@@ -34,7 +34,7 @@ import {
   velocityRef,
   visualRef,
 } from './bodyBindings.js';
-import { recordingManager } from './recordingManager.js';
+import { MAX_RECORDING_JSON_BYTES, recordingManager } from './recordingManager.js';
 import { ambientAudio } from './ambientAudio.js';
 
 function showStartupError(message: string): void {
@@ -1160,6 +1160,10 @@ async function main(): Promise<void> {
           input.onchange = (e: Event) => {
             const file = (e.target as HTMLInputElement).files?.[0];
             if (!file) return;
+            if (file.size > MAX_RECORDING_JSON_BYTES) {
+              recordingState.status = '导入失败：文件过大';
+              return;
+            }
             const reader = new FileReader();
             reader.onload = () => {
               try {
