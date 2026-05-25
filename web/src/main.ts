@@ -1143,9 +1143,10 @@ async function main(): Promise<void> {
             const reader = new FileReader();
             reader.onload = () => {
               try {
-                recordingManager.importJSON(reader.result as string);
+                const imported =
+                  typeof reader.result === 'string' && recordingManager.importJSON(reader.result);
                 recordingState.frameCount = recordingManager.frames.length;
-                recordingState.status = `已导入 (${recordingState.frameCount}帧)`;
+                recordingState.status = imported ? `已导入 (${recordingState.frameCount}帧)` : '导入失败';
               } catch (err) {
                 recordingState.status = '导入失败';
                 console.error(err);
@@ -1164,8 +1165,9 @@ async function main(): Promise<void> {
     .add(
       {
         saveToLocalStorage() {
-          recordingManager.saveToLocalStorage('recording');
-          recordingState.status = '已保存到本地存储';
+          recordingState.status = recordingManager.saveToLocalStorage('recording')
+            ? '已保存到本地存储'
+            : '保存失败';
         },
       },
       'saveToLocalStorage',
@@ -1176,9 +1178,9 @@ async function main(): Promise<void> {
     .add(
       {
         loadFromLocalStorage() {
-          recordingManager.loadFromLocalStorage('recording');
+          const loaded = recordingManager.loadFromLocalStorage('recording');
           recordingState.frameCount = recordingManager.frames.length;
-          recordingState.status = `已加载 (${recordingState.frameCount}帧)`;
+          recordingState.status = loaded ? `已加载 (${recordingState.frameCount}帧)` : '加载失败';
         },
       },
       'loadFromLocalStorage',

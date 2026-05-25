@@ -1,4 +1,143 @@
-import { cloneSceneState, type SceneState } from './scene.js';
+import { MAX_BODIES, cloneSceneState, type SceneState } from './scene.js';
+
+type JsonObject = Record<string, unknown>;
+
+const BODY_KINDS = ['blackHole', 'whiteHole', 'neutronStar'] as const;
+const DYNAMICS_MODES = ['static', 'kepler', 'nbody'] as const;
+const RENDER_BOOLEAN_FIELDS = [
+  'gravatationalLensing',
+  'renderBlackHole',
+  'adiskEnabled',
+  'adiskParticle',
+  'tonemappingEnabled',
+] as const;
+const RENDER_NUMBER_FIELDS = [
+  'adiskDensityV',
+  'adiskDensityH',
+  'adiskHeight',
+  'adiskLit',
+  'adiskNoiseLOD',
+  'adiskNoiseScale',
+  'adiskSpeed',
+  'bloomStrength',
+  'gamma',
+] as const;
+
+function isObject(value: unknown): value is JsonObject {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function isVec3(value: unknown): value is [number, number, number] {
+  return Array.isArray(value) && value.length === 3 && value.every(isFiniteNumber);
+}
+
+function isBodyKind(value: unknown): value is SceneState['bodies'][number]['kind'] {
+  return typeof value === 'string' && BODY_KINDS.includes(value as (typeof BODY_KINDS)[number]);
+}
+
+function isDynamicsMode(value: unknown): value is SceneState['dynamics'] {
+  return typeof value === 'string' && DYNAMICS_MODES.includes(value as (typeof DYNAMICS_MODES)[number]);
+}
+
+function isBodyVisual(value: unknown): value is SceneState['bodies'][number]['visual'] {
+  return (
+    isObject(value) &&
+    isFiniteNumber(value.size) &&
+    typeof value.glowColor === 'string' &&
+    isFiniteNumber(value.glowIntensity) &&
+    isFiniteNumber(value.adiskIntensity) &&
+    isFiniteNumber(value.distortionStrength)
+  );
+}
+
+function isSceneBody(value: unknown): value is SceneState['bodies'][number] {
+  return (
+    isObject(value) &&
+    isVec3(value.position) &&
+    isVec3(value.velocity) &&
+    isFiniteNumber(value.mass) &&
+    isBodyKind(value.kind) &&
+    isBodyVisual(value.visual)
+  );
+}
+
+function isTimeWarp(value: unknown): value is SceneState['timeWarp'] {
+  return (
+    isObject(value) &&
+    typeof value.enabled === 'boolean' &&
+    isFiniteNumber(value.intensity) &&
+    isFiniteNumber(value.potentialScale) &&
+    isFiniteNumber(value.distanceScale)
+  );
+}
+
+function isSceneState(value: unknown): value is SceneState {
+  if (!isObject(value)) return false;
+  const bodyCount = value.bodyCount;
+  return (
+    Number.isInteger(bodyCount) &&
+    typeof bodyCount === 'number' &&
+    bodyCount >= 0 &&
+    bodyCount <= MAX_BODIES &&
+    Array.isArray(value.bodies) &&
+    value.bodies.length >= MAX_BODIES &&
+    value.bodies.slice(0, MAX_BODIES).every(isSceneBody) &&
+    isDynamicsMode(value.dynamics) &&
+    isFiniteNumber(value.gmCentral) &&
+    isFiniteNumber(value.nbodyG) &&
+    isFiniteNumber(value.softening) &&
+    isFiniteNumber(value.dt) &&
+    typeof value.showTrails === 'boolean' &&
+    isTimeWarp(value.timeWarp)
+  );
+}
+
+function isRenderState(value: unknown): value is RecordingFrame['render'] {
+  return (
+    isObject(value) &&
+    RENDER_BOOLEAN_FIELDS.every((field) => typeof value[field] === 'boolean') &&
+    RENDER_NUMBER_FIELDS.every((field) => isFiniteNumber(value[field]))
+  );
+}
+
+function isRecordingFrame(value: unknown): value is RecordingFrame {
+  if (!isObject(value) || !isObject(value.camera)) return false;
+  return (
+    isFiniteNumber(value.timestamp) &&
+    value.timestamp >= 0 &&
+    isVec3(value.camera.position) &&
+    isFiniteNumber(value.camera.roll) &&
+    typeof value.camera.mouseControl === 'boolean' &&
+    typeof value.camera.frontView === 'boolean' &&
+    typeof value.camera.topView === 'boolean' &&
+    isFiniteNumber(value.camera.mouseX) &&
+    isFiniteNumber(value.camera.mouseY) &&
+    isSceneState(value.scene) &&
+    isRenderState(value.render)
+  );
+}
+
+function parseRecordingFrames(data: unknown): RecordingFrame[] | null {
+  if (!isObject(data) || !Array.isArray(data.frames)) {
+    return null;
+  }
+  if (!data.frames.every(isRecordingFrame)) {
+    return null;
+  }
+  return data.frames.map((frame) => ({
+    ...frame,
+    camera: {
+      ...frame.camera,
+      position: [...frame.camera.position],
+    },
+    scene: cloneSceneState(frame.scene),
+    render: { ...frame.render },
+  }));
+}
 
 /**
  * 单帧快照数据结构
@@ -250,11 +389,12 @@ export class RecordingManager {
   importJSON(jsonString: string): boolean {
     try {
       const data = JSON.parse(jsonString);
-      if (!data.frames || !Array.isArray(data.frames)) {
+      const frames = parseRecordingFrames(data);
+      if (!frames) {
         console.error('❌ 无效的JSON格式');
         return false;
       }
-      this.frames = data.frames;
+      this.frames = frames;
       console.log(`✅ 导入 ${this.frames.length} 帧数据`);
       return true;
     } catch (e) {
@@ -266,13 +406,15 @@ export class RecordingManager {
   /**
    * 保存到localStorage
    */
-  saveToLocalStorage(key: string = 'recording'): void {
+  saveToLocalStorage(key: string = 'recording'): boolean {
     const json = this.exportJSON();
     try {
       localStorage.setItem(key, json);
       console.log(`💾 已保存到localStorage (${(json.length / 1024).toFixed(1)} KB)`);
+      return true;
     } catch (e) {
       console.error('❌ 保存失败:', e);
+      return false;
     }
   }
 
