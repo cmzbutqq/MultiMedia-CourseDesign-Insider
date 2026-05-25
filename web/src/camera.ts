@@ -44,7 +44,7 @@ export function getCameraLookBasis(
 
   const target: [number, number, number] = [0, 0, 0];
   const roll = degToRad(cameraRollDeg);
-  const rr: [number, number, number] = [Math.sin(roll), Math.cos(roll), 0];
+  let rr: [number, number, number] = [Math.sin(roll), Math.cos(roll), 0];
 
   const wx = target[0] - cameraPos[0];
   const wy = target[1] - cameraPos[1];
@@ -57,8 +57,13 @@ export function getCameraLookBasis(
     a[2] * b[0] - a[0] * b[2],
     a[0] * b[1] - a[1] * b[0],
   ];
-  const uRaw = cross(ww, rr);
-  const uLen = Math.hypot(uRaw[0], uRaw[1], uRaw[2]) || 1;
+  let uRaw = cross(ww, rr);
+  let uLen = Math.hypot(uRaw[0], uRaw[1], uRaw[2]);
+  if (uLen <= 0.0001) {
+    rr = Math.abs(ww[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
+    uRaw = cross(ww, rr);
+    uLen = Math.hypot(uRaw[0], uRaw[1], uRaw[2]) || 1;
+  }
   const uu: [number, number, number] = [uRaw[0] / uLen, uRaw[1] / uLen, uRaw[2] / uLen];
   const vRaw = cross(uu, ww);
   const vLen = Math.hypot(vRaw[0], vRaw[1], vRaw[2]) || 1;

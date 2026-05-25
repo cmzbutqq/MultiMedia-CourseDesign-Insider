@@ -223,8 +223,15 @@ void ringColor(vec3 rayOrigin, vec3 rayDir, Ring ring, inout float minDistance,
 
 mat3 lookAt(vec3 origin, vec3 target, float roll) {
   vec3 rr = vec3(sin(roll), cos(roll), 0.0);
-  vec3 ww = normalize(target - origin);
-  vec3 uu = normalize(cross(ww, rr));
+  vec3 forward = target - origin;
+  float forwardLen = length(forward);
+  vec3 ww = forwardLen > EPSILON ? forward / forwardLen : vec3(0.0, 0.0, 1.0);
+  vec3 uuRaw = cross(ww, rr);
+  if (length(uuRaw) <= EPSILON) {
+    rr = abs(ww.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    uuRaw = cross(ww, rr);
+  }
+  vec3 uu = normalize(uuRaw);
   vec3 vv = normalize(cross(uu, ww));
 
   return mat3(uu, vv, ww);
