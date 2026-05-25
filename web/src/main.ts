@@ -40,6 +40,25 @@ import { ambientAudio } from './ambientAudio.js';
 // 暴露到全局作用域以便在控制台调试
 (window as any).recordingManager = recordingManager;
 
+function showStartupError(message: string): void {
+  document.body.innerHTML = '';
+  const pre = document.createElement('pre');
+  pre.style.cssText = [
+    'position:fixed',
+    'inset:0',
+    'z-index:10000',
+    'margin:0',
+    'padding:1rem',
+    'overflow:auto',
+    'color:#faa',
+    'background:#050508',
+    'font:14px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace',
+    'white-space:pre-wrap',
+  ].join(';');
+  pre.textContent = message;
+  document.body.appendChild(pre);
+}
+
 import simpleVert from '../shader/simple.vert?raw';
 import blackholeMainFrag from '../shader/blackhole_main.frag?raw';
 import bloomBrightnessFrag from '../shader/bloom_brightness_pass.frag?raw';
@@ -475,7 +494,9 @@ async function main(): Promise<void> {
     premultipliedAlpha: false,
   });
   if (!glCtx) {
-    throw new Error('需要支持 WebGL2 的浏览器');
+    const message = '需要支持 WebGL2 的浏览器。请检查浏览器硬件加速、GPU 黑名单、远程/虚拟环境 WebGL 支持，或使用支持 WebGL2 的浏览器。';
+    showStartupError(message);
+    return;
   }
   const gl: WebGL2RenderingContext = glCtx;
 
@@ -1521,5 +1542,5 @@ async function main(): Promise<void> {
 
 main().catch((e) => {
   console.error(e);
-  document.body.innerHTML += `<pre style="color:#faa;padding:1rem">${String(e)}</pre>`;
+  showStartupError(String(e));
 });
