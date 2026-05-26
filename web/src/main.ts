@@ -34,6 +34,27 @@ import {
   velocityRef,
   visualRef,
 } from './bodyBindings.js';
+import { MAX_RECORDING_JSON_BYTES, recordingManager } from './recordingManager.js';
+import { ambientAudio } from './ambientAudio.js';
+
+function showStartupError(message: string): void {
+  document.body.innerHTML = '';
+  const pre = document.createElement('pre');
+  pre.style.cssText = [
+    'position:fixed',
+    'inset:0',
+    'z-index:10000',
+    'margin:0',
+    'padding:1rem',
+    'overflow:auto',
+    'color:#faa',
+    'background:#050508',
+    'font:14px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace',
+    'white-space:pre-wrap',
+  ].join(';');
+  pre.textContent = message;
+  document.body.appendChild(pre);
+}
 
 import simpleVert from '../shader/simple.vert?raw';
 import blackholeMainFrag from '../shader/blackhole_main.frag?raw';
@@ -470,17 +491,20 @@ async function main(): Promise<void> {
     premultipliedAlpha: false,
   });
   if (!glCtx) {
-    throw new Error('需要支持 WebGL2 的浏览器');
+    const message = '需要支持 WebGL2 的浏览器。请检查浏览器硬件加速、GPU 黑名单、远程/虚拟环境 WebGL 支持，或使用支持 WebGL2 的浏览器。';
+    showStartupError(message);
+    return;
   }
   const gl: WebGL2RenderingContext = glCtx;
 
   const scene: SceneState = createDefaultScene();
   let initialSnapshot = cloneSceneState(scene);
   const trails = new TrailBuffer();
+  const assetPath = (path: string): string => `${import.meta.env.BASE_URL}${path}`;
 
   const [galaxy, colorMap, vao, passes] = await Promise.all([
-    loadCubemap(gl, '/assets/skybox_nebula_dark'),
-    loadTexture2D(gl, '/assets/color_map.png'),
+    loadCubemap(gl, assetPath('assets/skybox_nebula_dark')),
+    loadTexture2D(gl, assetPath('assets/color_map.png')),
     Promise.resolve(createQuadVAO(gl)),
     Promise.resolve({
       blackhole: makePass(gl, simpleVert, blackholeMainFrag),
@@ -1035,7 +1059,183 @@ async function main(): Promise<void> {
   gui.add(params, 'tonemappingEnabled');
   gui.add(params, 'gamma', 1, 4);
 
-  function drawTrails(time: number): void {
+  // 录制/回放控制
+  const recordingFolder = gui.addFolder('录制/回放');
+  const recordingState = {
+    status: '就绪',
+    frameCount: 0,
+    playbackProgress: 0,
+  };
+
+  recordingFolder
+    .add(
+      {
+        startRecording() {
+          recordingManager.startRecording();
+          recordingState.status = '录制中...';
+          recordingState.frameCount = 0;
+        },
+      },
+      'startRecording',
+    )
+    .name('开始录制');
+
+  recordingFolder
+    .add(
+      {
+        stopRecording() {
+          recordingManager.stopRecording();
+          recordingState.frameCount = recordingManager.frames.length;
+          recordingState.status = `已停止 (${recordingState.frameCount}帧)`;
+        },
+      },
+      'stopRecording',
+    )
+    .name('停止录制');
+
+  recordingFolder
+    .add(
+      {
+        startPlayback() {
+          if (recordingManager.frames.length > 0) {
+            // 重置到初始快照
+            applySceneState(scene, cloneSceneState(initialSnapshot));
+            trails.reset();
+          }
+          recordingState.status = recordingManager.startPlayback()
+            ? '回放中...'
+            : '没有录制数据';
+        },
+      },
+      'startPlayback',
+    )
+    .name('开始回放');
+
+  recordingFolder
+    .add(
+      {
+        stopPlayback() {
+          recordingManager.stopPlayback();
+          recordingState.status = '回放已停止';
+        },
+      },
+      'stopPlayback',
+    )
+    .name('停止回放');
+
+  recordingFolder
+    .add(recordingState, 'playbackProgress', 0, 1, 0.01)
+    .name('进度')
+    .listen()
+    .onChange((v: number) => {
+      recordingManager.setPlaybackProgress(v);
+    });
+
+  recordingFolder
+    .add(
+      {
+        exportJSON() {
+          const json = recordingManager.exportJSON();
+          const blob = new Blob([json], { type: 'application/json' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `recording-${Date.now()}.json`;
+          a.click();
+          URL.revokeObjectURL(url);
+          recordingState.status = '已导出JSON';
+        },
+      },
+      'exportJSON',
+    )
+    .name('导出JSON');
+
+  recordingFolder
+    .add(
+      {
+        importJSON() {
+          const input = document.createElement('input');
+          input.type = 'file';
+          input.accept = '.json';
+          input.onchange = (e: Event) => {
+            const file = (e.target as HTMLInputElement).files?.[0];
+            if (!file) return;
+            if (file.size > MAX_RECORDING_JSON_BYTES) {
+              recordingState.status = '导入失败：文件过大';
+              return;
+            }
+            const reader = new FileReader();
+            reader.onload = () => {
+              try {
+                const imported =
+                  typeof reader.result === 'string' && recordingManager.importJSON(reader.result);
+                recordingState.frameCount = recordingManager.frames.length;
+                recordingState.status = imported ? `已导入 (${recordingState.frameCount}帧)` : '导入失败';
+              } catch (err) {
+                recordingState.status = '导入失败';
+                console.error(err);
+              }
+            };
+            reader.readAsText(file);
+          };
+          input.click();
+        },
+      },
+      'importJSON',
+    )
+    .name('导入JSON');
+
+  recordingFolder
+    .add(
+      {
+        saveToLocalStorage() {
+          recordingState.status = recordingManager.saveToLocalStorage('recording')
+            ? '已保存到本地存储'
+            : '保存失败';
+        },
+      },
+      'saveToLocalStorage',
+    )
+    .name('保存到本地');
+
+  recordingFolder
+    .add(
+      {
+        loadFromLocalStorage() {
+          const loaded = recordingManager.loadFromLocalStorage('recording');
+          recordingState.frameCount = recordingManager.frames.length;
+          recordingState.status = loaded ? `已加载 (${recordingState.frameCount}帧)` : '加载失败';
+        },
+      },
+      'loadFromLocalStorage',
+    )
+    .name('从本地加载');
+
+  // 状态显示（必须 listen 才会随对象变化刷新）
+  recordingFolder.add(recordingState, 'status').name('状态').listen();
+  recordingFolder.add(recordingState, 'frameCount').name('帧数').listen();
+
+  // 氛围音频控制
+  const audioFolder = gui.addFolder('氛围音频');
+  const audioState = {
+    enabled: false,
+    volume: 0.5,
+  };
+  audioFolder
+    .add(audioState, 'enabled')
+    .name('启用')
+    .onChange(async (v: boolean) => {
+      await ambientAudio.toggle(v);
+      audioState.enabled = ambientAudio.isEnabled();
+    });
+  audioFolder
+    .add(audioState, 'volume', 0, 1, 0.01)
+    .name('音量')
+    .onChange((v: number) => {
+      ambientAudio.setVolume(v);
+    });
+
+  function drawTrails(time: number, cameraPosOverride?: [number, number, number]): void {
     if (!trailCanvas || !trailCtx) return;
     const w = trailCanvas.width;
     const h = trailCanvas.height;
@@ -1052,6 +1252,7 @@ async function main(): Promise<void> {
       params.frontView,
       params.topView,
       params.cameraRoll,
+      cameraPosOverride,
     );
 
     for (let bi = 0; bi < scene.bodyCount; bi++) {
@@ -1087,9 +1288,62 @@ async function main(): Promise<void> {
       const time = now / 1000;
       if (!pipeline) return;
 
-      await updateHandGesture();
+      const playbackFrame = recordingManager.getPlaybackFrame();
+      if (playbackFrame) {
+        Object.assign(params, {
+          cameraRoll: playbackFrame.camera.roll,
+          mouseControl: playbackFrame.camera.mouseControl,
+          frontView: playbackFrame.camera.frontView,
+          topView: playbackFrame.camera.topView,
+        });
+        mouseX = playbackFrame.camera.mouseX ?? 0;
+        mouseY = playbackFrame.camera.mouseY ?? 0;
+        applySceneState(scene, playbackFrame.scene);
+        syncUiSceneFromScene(uiScene, scene);
+        syncBodyFolders();
+        Object.assign(params, playbackFrame.render);
+        gui.controllersRecursive().forEach((c) => c.updateDisplay());
+      } else {
+        await updateHandGesture();
+        stepScene(scene);
+      }
 
-      stepScene(scene);
+      const cam = getCameraLookBasis(
+        time,
+        mouseX,
+        mouseY,
+        canvas.width,
+        canvas.height,
+        params.mouseControl,
+        params.frontView,
+        params.topView,
+        params.cameraRoll,
+        playbackFrame?.camera.position,
+      );
+      recordingManager.recordFrame(
+        time,
+        cam.cameraPos,
+        params.cameraRoll,
+        params.mouseControl,
+        params.frontView,
+        params.topView,
+        mouseX,
+        mouseY,
+        scene,
+        params,
+      );
+
+      // 每帧同步录制 UI 状态
+      const recStatus = recordingManager.getStatus();
+      recordingState.frameCount = recStatus.frameCount;
+      recordingState.playbackProgress = recStatus.playbackProgress;
+      if (recStatus.isRecording) {
+        recordingState.status = `录制中... ${recStatus.frameCount}帧 / ${recStatus.duration.toFixed(1)}s`;
+      } else if (recStatus.isPlayback) {
+        recordingState.status = `回放中... ${(recStatus.playbackProgress * 100).toFixed(0)}%`;
+      }
+
+      ambientAudio.update(scene);
 
       if (scene.showTrails) {
         for (let bi = 0; bi < scene.bodyCount; bi++) {
@@ -1122,6 +1376,16 @@ async function main(): Promise<void> {
         setF(gl, p.program, p.uniforms, 'cameraRoll', params.cameraRoll);
         setF(gl, p.program, p.uniforms, 'frontView', params.frontView ? 1 : 0);
         setF(gl, p.program, p.uniforms, 'topView', params.topView ? 1 : 0);
+        setF(gl, p.program, p.uniforms, 'playbackCamera', playbackFrame ? 1 : 0);
+        setV3(
+          gl,
+          p.program,
+          p.uniforms,
+          'playbackCameraPos',
+          playbackFrame?.camera.position[0] ?? 0,
+          playbackFrame?.camera.position[1] ?? 0,
+          playbackFrame?.camera.position[2] ?? 0,
+        );
         setF(gl, p.program, p.uniforms, 'adiskEnabled', params.adiskEnabled ? 1 : 0);
         setF(gl, p.program, p.uniforms, 'adiskParticle', params.adiskParticle ? 1 : 0);
         setF(gl, p.program, p.uniforms, 'adiskDensityV', params.adiskDensityV);
@@ -1263,8 +1527,8 @@ async function main(): Promise<void> {
       gl.bindTexture(gl.TEXTURE_2D, output.texture);
     });
 
-      drawTrails(time);
-      firstFrame = false;
+    drawTrails(time, playbackFrame?.camera.position);
+    firstFrame = false;
     } finally {
       requestAnimationFrame(frame);
     }
@@ -1275,5 +1539,5 @@ async function main(): Promise<void> {
 
 main().catch((e) => {
   console.error(e);
-  document.body.innerHTML += `<pre style="color:#faa;padding:1rem">${String(e)}</pre>`;
+  showStartupError(String(e));
 });

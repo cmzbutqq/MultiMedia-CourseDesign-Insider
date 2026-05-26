@@ -16,6 +16,7 @@ export function getCameraLookBasis(
   frontView: boolean,
   topView: boolean,
   cameraRollDeg: number,
+  cameraPosOverride?: [number, number, number],
 ): {
   cameraPos: [number, number, number];
   uu: [number, number, number];
@@ -23,7 +24,9 @@ export function getCameraLookBasis(
   ww: [number, number, number];
 } {
   let cameraPos: [number, number, number];
-  if (mouseControl) {
+  if (cameraPosOverride) {
+    cameraPos = [...cameraPosOverride];
+  } else if (mouseControl) {
     const mx = Math.max(0, Math.min(1, mouseX / resolutionX)) - 0.5;
     const my = Math.max(0, Math.min(1, mouseY / resolutionY)) - 0.5;
     cameraPos = [-Math.cos(mx * 10) * 15, my * 30, Math.sin(mx * 10) * 15];
@@ -41,7 +44,7 @@ export function getCameraLookBasis(
 
   const target: [number, number, number] = [0, 0, 0];
   const roll = degToRad(cameraRollDeg);
-  const rr: [number, number, number] = [Math.sin(roll), Math.cos(roll), 0];
+  let rr: [number, number, number] = [Math.sin(roll), Math.cos(roll), 0];
 
   const wx = target[0] - cameraPos[0];
   const wy = target[1] - cameraPos[1];
@@ -54,8 +57,13 @@ export function getCameraLookBasis(
     a[2] * b[0] - a[0] * b[2],
     a[0] * b[1] - a[1] * b[0],
   ];
-  const uRaw = cross(ww, rr);
-  const uLen = Math.hypot(uRaw[0], uRaw[1], uRaw[2]) || 1;
+  let uRaw = cross(ww, rr);
+  let uLen = Math.hypot(uRaw[0], uRaw[1], uRaw[2]);
+  if (uLen <= 0.0001) {
+    rr = Math.abs(ww[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
+    uRaw = cross(ww, rr);
+    uLen = Math.hypot(uRaw[0], uRaw[1], uRaw[2]) || 1;
+  }
   const uu: [number, number, number] = [uRaw[0] / uLen, uRaw[1] / uLen, uRaw[2] / uLen];
   const vRaw = cross(uu, ww);
   const vLen = Math.hypot(vRaw[0], vRaw[1], vRaw[2]) || 1;
@@ -84,5 +92,6 @@ export function worldToScreenPx(
   const px = width * 0.5 + puvX * height;
   // Canvas2D 的 y 轴向下，需将相机空间 y 投影翻转到屏幕坐标。
   const py = height * (0.5 - puvY);
+  if (!Number.isFinite(px) || !Number.isFinite(py)) return null;
   return { x: px, y: py };
 }

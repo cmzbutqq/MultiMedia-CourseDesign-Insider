@@ -19,6 +19,8 @@ uniform sampler2D colorMap;
 uniform float frontView;
 uniform float topView;
 uniform float cameraRoll;
+uniform float playbackCamera;
+uniform vec3 playbackCameraPos;
 
 uniform float gravatationalLensing;
 uniform float renderBlackHole;
@@ -148,7 +150,7 @@ vec3 panoramaColor(sampler2D tex, vec3 dir) {
 }
 
 vec3 accel(float h2, vec3 pos) {
-  float r2 = dot(pos, pos);
+  float r2 = max(dot(pos, pos), EPSILON * EPSILON);
   float r5 = pow(r2, 2.5);
   return -1.5 * h2 * pos / r5 * 1.0;
 }
@@ -221,8 +223,15 @@ void ringColor(vec3 rayOrigin, vec3 rayDir, Ring ring, inout float minDistance,
 
 mat3 lookAt(vec3 origin, vec3 target, float roll) {
   vec3 rr = vec3(sin(roll), cos(roll), 0.0);
-  vec3 ww = normalize(target - origin);
-  vec3 uu = normalize(cross(ww, rr));
+  vec3 forward = target - origin;
+  float forwardLen = length(forward);
+  vec3 ww = forwardLen > EPSILON ? forward / forwardLen : vec3(0.0, 0.0, 1.0);
+  vec3 uuRaw = cross(ww, rr);
+  if (length(uuRaw) <= EPSILON) {
+    rr = abs(ww.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    uuRaw = cross(ww, rr);
+  }
+  vec3 uu = normalize(uuRaw);
   vec3 vv = normalize(cross(uu, ww));
 
   return mat3(uu, vv, ww);
@@ -232,7 +241,7 @@ void adiskColor(vec3 posWorld, inout vec3 color, inout float alpha) {
   vec3 pos = posWorld - adiskOrigin;
   float innerRadius = 2.6 * adiskDiskSize;
   float outerRadius = 12.0 * adiskDiskSize;
-  float hDisk = adiskHeight * adiskDiskSize;
+  float hDisk = max(adiskHeight * adiskDiskSize, EPSILON);
 
   float density = max(
       0.0, 1.0 - length(pos.xyz / vec3(outerRadius, hDisk, outerRadius)));
@@ -373,7 +382,9 @@ void main() {
   mat3 view;
 
   vec3 cameraPos;
-  if (mouseControl > 0.5) {
+  if (playbackCamera > 0.5) {
+    cameraPos = playbackCameraPos;
+  } else if (mouseControl > 0.5) {
     vec2 mouse = clamp(vec2(mouseX, mouseY) / resolution.xy, 0.0, 1.0) - 0.5;
     cameraPos = vec3(-cos(mouse.x * 10.0) * 15.0, mouse.y * 30.0,
                      sin(mouse.x * 10.0) * 15.0);
