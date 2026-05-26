@@ -44,6 +44,11 @@ app.config['MAX_CONTENT_LENGTH'] = int(
     os.environ.get('MAX_CONTENT_LENGTH', str(MAX_IMAGE_BASE64_CHARS + 1024))
 )
 
+
+MAX_ROOM_NAME_LENGTH = int(os.environ.get('MAX_ROOM_NAME_LENGTH', '64'))
+MAX_ROOMS_PER_CLIENT = int(os.environ.get('MAX_ROOMS_PER_CLIENT', '5'))
+ALLOWED_ROOM_CHARS = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_')
+
 _cors_origins = [
     os.environ.get('CORS_ORIGIN', 'http://localhost:5173'),
 ]
@@ -58,6 +63,23 @@ socketio = SocketIO(app,
 def _strip_data_url_prefix(image_b64: str) -> str:
     """Strip optional data URL prefix from base64 image data."""
     return image_b64.split(',', 1)[1] if ',' in image_b64 else image_b64
+
+
+def _validate_socket_payload(payload: Any) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError('请求数据必须是 JSON 对象')
+    return payload
+
+
+def _normalize_room_name(raw_room: Any) -> str:
+    room = str(raw_room).strip() if raw_room is not None else 'default'
+    if not room:
+        room = 'default'
+    if len(room) > MAX_ROOM_NAME_LENGTH:
+        raise ValueError(f'room 名称过长，最多 {MAX_ROOM_NAME_LENGTH} 个字符')
+    if any(c not in ALLOWED_ROOM_CHARS for c in room):
+        raise ValueError('room 名称包含非法字符，仅允许字母、数字、-、_')
+    return room
 
 def _decode_image_payload(image_b64: Any) -> bytes:
     """Validate and decode image payload, raising ValueError on invalid input."""
@@ -348,7 +370,8 @@ def handle_connect():
     clients[client_id] = {
         'connected_at': time.time(),
         'frames_processed': 0,
-        'last_frame_time': 0
+        'last_frame_time': 0,
+        'rooms': set()
     }
     emit('connected', {
         'client_id': client_id,
@@ -378,6 +401,8 @@ def handle_video_frame(data):
         if gesture_detector is None:
             emit('frame_error', {'error': '检测器未初始化'})
             return
+
+        data = _validate_socket_payload(data)
 
         if 'image' not in data:
             emit('frame_error', {'error': '缺少 image 字段'})
@@ -409,18 +434,36 @@ def handle_video_frame(data):
 @socketio.on('subscribe')
 def handle_subscribe(data):
     """订阅特定房间（用于多用户支持）"""
-    room = data.get('room', 'default')
-    join_room(room)
-    logger.info(f"客户端 {request.sid} 加入房间 {room}")
-    emit('subscribed', {'room': room})
+    try:
+        payload = _validate_socket_payload(data)
+        room = _normalize_room_name(payload.get('room', 'default'))
+        client = clients.get(request.sid)
+        if client is not None and room not in client['rooms'] and len(client['rooms']) >= MAX_ROOMS_PER_CLIENT:
+            emit('frame_error', {'error': f'订阅房间数量已达上限 ({MAX_ROOMS_PER_CLIENT})'})
+            return
+
+        join_room(room)
+        if client is not None:
+            client['rooms'].add(room)
+        logger.info(f"客户端 {request.sid} 加入房间 {room}")
+        emit('subscribed', {'room': room})
+    except ValueError as exc:
+        emit('frame_error', {'error': str(exc)})
 
 @socketio.on('unsubscribe')
 def handle_unsubscribe(data):
     """取消订阅房间"""
-    room = data.get('room', 'default')
-    leave_room(room)
-    logger.info(f"客户端 {request.sid} 离开房间 {room}")
-    emit('unsubscribed', {'room': room})
+    try:
+        payload = _validate_socket_payload(data)
+        room = _normalize_room_name(payload.get('room', 'default'))
+        leave_room(room)
+        client = clients.get(request.sid)
+        if client is not None:
+            client['rooms'].discard(room)
+        logger.info(f"客户端 {request.sid} 离开房间 {room}")
+        emit('unsubscribed', {'room': room})
+    except ValueError as exc:
+        emit('frame_error', {'error': str(exc)})
 
 def initialize_detector():
     """初始化手势检测器"""
