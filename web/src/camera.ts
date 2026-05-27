@@ -26,14 +26,14 @@ export function getCameraLookBasis(
   let cameraPos: [number, number, number];
   if (cameraPosOverride) {
     cameraPos = [...cameraPosOverride];
-  } else if (mouseControl) {
-    const mx = Math.max(0, Math.min(1, mouseX / resolutionX)) - 0.5;
-    const my = Math.max(0, Math.min(1, mouseY / resolutionY)) - 0.5;
-    cameraPos = [-Math.cos(mx * 10) * 15, my * 30, Math.sin(mx * 10) * 15];
   } else if (frontView) {
     cameraPos = [10, 1, 10];
   } else if (topView) {
     cameraPos = [15, 15, 0];
+  } else if (mouseControl) {
+    const mx = Math.max(0, Math.min(1, mouseX / resolutionX)) - 0.5;
+    const my = Math.max(0, Math.min(1, mouseY / resolutionY)) - 0.5;
+    cameraPos = [-Math.cos(mx * 10) * 15, my * 30, Math.sin(mx * 10) * 15];
   } else {
     cameraPos = [
       -Math.cos(time * 0.1) * 15,

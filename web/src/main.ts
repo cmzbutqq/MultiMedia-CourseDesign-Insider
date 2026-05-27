@@ -1013,7 +1013,35 @@ async function main(): Promise<void> {
 
   gui.add(params, 'gravatationalLensing');
   gui.add(params, 'renderBlackHole');
-  gui.add(params, 'mouseControl');
+  const mouseControlCtrl = gui.add(params, 'mouseControl');
+  const frontViewCtrl = gui.add(params, 'frontView');
+  const topViewCtrl = gui.add(params, 'topView');
+  function updateViewControlDisplay(): void {
+    mouseControlCtrl.updateDisplay();
+    frontViewCtrl.updateDisplay();
+    topViewCtrl.updateDisplay();
+  }
+  mouseControlCtrl.onChange((enabled: boolean) => {
+    if (enabled) {
+      params.frontView = false;
+      params.topView = false;
+      updateViewControlDisplay();
+    }
+  });
+  frontViewCtrl.onChange((enabled: boolean) => {
+    if (enabled) {
+      params.mouseControl = false;
+      params.topView = false;
+      updateViewControlDisplay();
+    }
+  });
+  topViewCtrl.onChange((enabled: boolean) => {
+    if (enabled) {
+      params.mouseControl = false;
+      params.frontView = false;
+      updateViewControlDisplay();
+    }
+  });
   gui.add(params, 'gestureMode', {
     '关闭': 'off',
     '本地计算': 'local',
@@ -1058,8 +1086,6 @@ async function main(): Promise<void> {
       });
   });
   gui.add(params, 'cameraRoll', -180, 180);
-  gui.add(params, 'frontView');
-  gui.add(params, 'topView');
   gui.add(params, 'adiskEnabled');
   gui.add(params, 'adiskParticle');
   gui.add(params, 'adiskDensityV', 0, 10);
@@ -1403,6 +1429,7 @@ async function main(): Promise<void> {
         setF(gl, p.program, p.uniforms, 'frontView', params.frontView ? 1 : 0);
         setF(gl, p.program, p.uniforms, 'topView', params.topView ? 1 : 0);
         setF(gl, p.program, p.uniforms, 'playbackCamera', playbackFrame ? 1 : 0);
+        setV3(gl, p.program, p.uniforms, 'cameraWorld', cam.cameraPos[0], cam.cameraPos[1], cam.cameraPos[2]);
         setV3(
           gl,
           p.program,

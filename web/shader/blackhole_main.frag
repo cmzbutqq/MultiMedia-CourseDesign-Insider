@@ -21,6 +21,7 @@ uniform float topView;
 uniform float cameraRoll;
 uniform float playbackCamera;
 uniform vec3 playbackCameraPos;
+uniform vec3 cameraWorld;
 
 uniform float gravatationalLensing;
 uniform float renderBlackHole;
@@ -325,13 +326,15 @@ void adiskColor(vec3 posWorld, inout vec3 color, inout float alpha) {
     }
     beta = clamp(beta, 0.0, 0.95);
 
-    // 视线方向（相机 → 采样点 → 我们近似为采样点的视径方向）
-    // 注意：traceColor 中是从相机沿 dir 步进，这里没有直接的 viewDir，
-    // 用 sample 到 adiskOrigin 的方向作为代理视线（最常用近似）
-    vec3 viewDir = normalize(adiskOrigin - posWorld);
+    // 采样点指向相机的方向；用真实观察方向才能产生左右红/蓝移。
+    vec3 observerOffset = cameraWorld - posWorld;
+    float observerDistance = length(observerOffset);
+    vec3 toObserver = observerDistance > EPSILON
+        ? observerOffset / observerDistance
+        : normalize(cameraWorld - adiskOrigin);
 
     // 径向速度（朝向观察者为正）
-    float vDotN = dot(vHat, -viewDir) * beta;        // 取负号让"迎面"为正
+    float vDotN = dot(vHat, toObserver) * beta;
     float gamma = 1.0 / sqrt(max(1.0 - beta * beta, EPSILON));
     // 相对论多普勒因子 D = 1 / (γ (1 - v·n̂))
     dopplerFactor = 1.0 / (gamma * max(1.0 - vDotN, EPSILON));
@@ -453,14 +456,14 @@ void main() {
   vec3 cameraPos;
   if (playbackCamera > 0.5) {
     cameraPos = playbackCameraPos;
-  } else if (mouseControl > 0.5) {
-    vec2 mouse = clamp(vec2(mouseX, mouseY) / resolution.xy, 0.0, 1.0) - 0.5;
-    cameraPos = vec3(-cos(mouse.x * 10.0) * 15.0, mouse.y * 30.0,
-                     sin(mouse.x * 10.0) * 15.0);
   } else if (frontView > 0.5) {
     cameraPos = vec3(10.0, 1.0, 10.0);
   } else if (topView > 0.5) {
     cameraPos = vec3(15.0, 15.0, 0.0);
+  } else if (mouseControl > 0.5) {
+    vec2 mouse = clamp(vec2(mouseX, mouseY) / resolution.xy, 0.0, 1.0) - 0.5;
+    cameraPos = vec3(-cos(mouse.x * 10.0) * 15.0, mouse.y * 30.0,
+                     sin(mouse.x * 10.0) * 15.0);
   } else {
     cameraPos = vec3(-cos(time * 0.1) * 15.0, sin(time * 0.1) * 15.0,
                      sin(time * 0.1) * 15.0);
