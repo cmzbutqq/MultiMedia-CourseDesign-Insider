@@ -9,6 +9,9 @@ const RENDER_BOOLEAN_FIELDS = [
   'renderBlackHole',
   'adiskEnabled',
   'adiskParticle',
+  'dopplerEnabled',
+  'beamingEnabled',
+  'spinEnabled',
   'tonemappingEnabled',
 ] as const;
 const RENDER_NUMBER_FIELDS = [
@@ -19,10 +22,24 @@ const RENDER_NUMBER_FIELDS = [
   'adiskNoiseLOD',
   'adiskNoiseScale',
   'adiskSpeed',
+  'dopplerStrength',
+  'dopplerBeta',
+  'beamingPower',
+  'spinA',
   'bloomIterations',
   'bloomStrength',
   'gamma',
 ] as const;
+
+const RELATIVISTIC_RENDER_DEFAULTS = {
+  dopplerEnabled: false,
+  dopplerStrength: 1.0,
+  dopplerBeta: 0.35,
+  beamingEnabled: false,
+  beamingPower: 3.5,
+  spinEnabled: false,
+  spinA: 0.7,
+} as const;
 
 const MAX_RECORDED_BLOOM_ITER = 8;
 const MAX_RECORDED_VECTOR_ABS = 10000;
@@ -136,6 +153,10 @@ function isRenderState(value: unknown): value is RecordingFrame['render'] {
     isIntegerInRange(value.adiskNoiseLOD, 1, 12) &&
     isNumberInRange(value.adiskNoiseScale, 0, 10) &&
     isNumberInRange(value.adiskSpeed, 0, 1) &&
+    isNumberInRange(value.dopplerStrength, 0, 2) &&
+    isNumberInRange(value.dopplerBeta, 0, 0.5) &&
+    isNumberInRange(value.beamingPower, 1, 6) &&
+    isNumberInRange(value.spinA, 0, 0.998) &&
     isIntegerInRange(value.bloomIterations, 1, MAX_RECORDED_BLOOM_ITER) &&
     isNumberInRange(value.bloomStrength, 0, 1) &&
     isNumberInRange(value.gamma, 1, 4)
@@ -206,18 +227,28 @@ function parseRecordingFrames(data: unknown): RecordingFrame[] | null {
   if (!isObject(data) || !Array.isArray(data.frames) || data.frames.length > MAX_RECORDING_FRAMES) {
     return null;
   }
-  if (!data.frames.every(isRecordingFrame)) {
+  const framesWithDefaults = data.frames.map((frame) => {
+    if (!isObject(frame) || !isObject(frame.render)) return frame;
+    return {
+      ...frame,
+      render: {
+        ...RELATIVISTIC_RENDER_DEFAULTS,
+        ...frame.render,
+      },
+    };
+  });
+  if (!framesWithDefaults.every(isRecordingFrame)) {
     return null;
   }
-  if (!data.frames.every(isCameraClearOfActiveBodies)) {
+  if (!framesWithDefaults.every(isCameraClearOfActiveBodies)) {
     return null;
   }
-  for (let i = 1; i < data.frames.length; i++) {
-    if (data.frames[i]!.timestamp < data.frames[i - 1]!.timestamp) {
+  for (let i = 1; i < framesWithDefaults.length; i++) {
+    if (framesWithDefaults[i]!.timestamp < framesWithDefaults[i - 1]!.timestamp) {
       return null;
     }
   }
-  return data.frames.map((frame) => ({
+  return framesWithDefaults.map((frame) => ({
     timestamp: frame.timestamp,
     camera: {
       position: [...frame.camera.position],
@@ -241,6 +272,13 @@ function parseRecordingFrames(data: unknown): RecordingFrame[] | null {
       adiskNoiseLOD: frame.render.adiskNoiseLOD,
       adiskNoiseScale: frame.render.adiskNoiseScale,
       adiskSpeed: frame.render.adiskSpeed,
+      dopplerEnabled: frame.render.dopplerEnabled,
+      dopplerStrength: frame.render.dopplerStrength,
+      dopplerBeta: frame.render.dopplerBeta,
+      beamingEnabled: frame.render.beamingEnabled,
+      beamingPower: frame.render.beamingPower,
+      spinEnabled: frame.render.spinEnabled,
+      spinA: frame.render.spinA,
       bloomIterations: frame.render.bloomIterations,
       bloomStrength: frame.render.bloomStrength,
       tonemappingEnabled: frame.render.tonemappingEnabled,
@@ -283,6 +321,13 @@ export interface RecordingFrame {
     adiskNoiseLOD: number;
     adiskNoiseScale: number;
     adiskSpeed: number;
+    dopplerEnabled: boolean;
+    dopplerStrength: number;
+    dopplerBeta: number;
+    beamingEnabled: boolean;
+    beamingPower: number;
+    spinEnabled: boolean;
+    spinA: number;
     bloomIterations: number;
     bloomStrength: number;
     tonemappingEnabled: boolean;
@@ -351,6 +396,13 @@ export class RecordingManager {
       adiskNoiseLOD: number;
       adiskNoiseScale: number;
       adiskSpeed: number;
+      dopplerEnabled: boolean;
+      dopplerStrength: number;
+      dopplerBeta: number;
+      beamingEnabled: boolean;
+      beamingPower: number;
+      spinEnabled: boolean;
+      spinA: number;
       bloomIterations: number;
       bloomStrength: number;
       tonemappingEnabled: boolean;
@@ -394,6 +446,13 @@ export class RecordingManager {
         adiskNoiseLOD: params.adiskNoiseLOD,
         adiskNoiseScale: params.adiskNoiseScale,
         adiskSpeed: params.adiskSpeed,
+        dopplerEnabled: params.dopplerEnabled,
+        dopplerStrength: params.dopplerStrength,
+        dopplerBeta: params.dopplerBeta,
+        beamingEnabled: params.beamingEnabled,
+        beamingPower: params.beamingPower,
+        spinEnabled: params.spinEnabled,
+        spinA: params.spinA,
         bloomIterations: params.bloomIterations,
         bloomStrength: params.bloomStrength,
         tonemappingEnabled: params.tonemappingEnabled,

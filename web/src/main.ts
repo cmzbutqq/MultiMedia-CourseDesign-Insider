@@ -116,6 +116,14 @@ interface Params {
   adiskNoiseLOD: number;
   adiskNoiseScale: number;
   adiskSpeed: number;
+  // 相对论视觉效应
+  dopplerEnabled: boolean;
+  dopplerStrength: number;
+  dopplerBeta: number;
+  beamingEnabled: boolean;
+  beamingPower: number;
+  spinEnabled: boolean;
+  spinA: number;
   bloomIterations: number;
   bloomStrength: number;
   tonemappingEnabled: boolean;
@@ -143,6 +151,13 @@ const params: Params = {
   adiskNoiseLOD: 5,
   adiskNoiseScale: 0.8,
   adiskSpeed: 0.5,
+  dopplerEnabled: false,
+  dopplerStrength: 1.0,
+  dopplerBeta: 0.35,
+  beamingEnabled: false,
+  beamingPower: 3.5,
+  spinEnabled: false,
+  spinA: 0.7,
   bloomIterations: MAX_BLOOM_ITER,
   bloomStrength: 0.1,
   tonemappingEnabled: true,
@@ -998,7 +1013,35 @@ async function main(): Promise<void> {
 
   gui.add(params, 'gravatationalLensing');
   gui.add(params, 'renderBlackHole');
-  gui.add(params, 'mouseControl');
+  const mouseControlCtrl = gui.add(params, 'mouseControl');
+  const frontViewCtrl = gui.add(params, 'frontView');
+  const topViewCtrl = gui.add(params, 'topView');
+  function updateViewControlDisplay(): void {
+    mouseControlCtrl.updateDisplay();
+    frontViewCtrl.updateDisplay();
+    topViewCtrl.updateDisplay();
+  }
+  mouseControlCtrl.onChange((enabled: boolean) => {
+    if (enabled) {
+      params.frontView = false;
+      params.topView = false;
+      updateViewControlDisplay();
+    }
+  });
+  frontViewCtrl.onChange((enabled: boolean) => {
+    if (enabled) {
+      params.mouseControl = false;
+      params.topView = false;
+      updateViewControlDisplay();
+    }
+  });
+  topViewCtrl.onChange((enabled: boolean) => {
+    if (enabled) {
+      params.mouseControl = false;
+      params.frontView = false;
+      updateViewControlDisplay();
+    }
+  });
   gui.add(params, 'gestureMode', {
     '关闭': 'off',
     '本地计算': 'local',
@@ -1043,8 +1086,6 @@ async function main(): Promise<void> {
       });
   });
   gui.add(params, 'cameraRoll', -180, 180);
-  gui.add(params, 'frontView');
-  gui.add(params, 'topView');
   gui.add(params, 'adiskEnabled');
   gui.add(params, 'adiskParticle');
   gui.add(params, 'adiskDensityV', 0, 10);
@@ -1054,6 +1095,17 @@ async function main(): Promise<void> {
   gui.add(params, 'adiskNoiseLOD', 1, 12, 1);
   gui.add(params, 'adiskNoiseScale', 0, 10);
   gui.add(params, 'adiskSpeed', 0, 1);
+
+  // === 相对论视觉效应 ===
+  const relativisticFolder = gui.addFolder('相对论视觉效应');
+  relativisticFolder.add(params, 'dopplerEnabled').name('多普勒色偏 启用');
+  relativisticFolder.add(params, 'dopplerStrength', 0, 2, 0.01).name('色偏强度');
+  relativisticFolder.add(params, 'dopplerBeta', 0, 0.5, 0.01).name('盘速度 β=v/c');
+  relativisticFolder.add(params, 'beamingEnabled').name('束宽增强 启用');
+  relativisticFolder.add(params, 'beamingPower', 1, 6, 0.1).name('聚束指数');
+  relativisticFolder.add(params, 'spinEnabled').name('黑洞自旋 启用');
+  relativisticFolder.add(params, 'spinA', 0, 0.998, 0.001).name('自旋参数 a');
+
   gui.add(params, 'bloomIterations', 1, MAX_BLOOM_ITER, 1);
   gui.add(params, 'bloomStrength', 0, 1);
   gui.add(params, 'tonemappingEnabled');
@@ -1377,6 +1429,7 @@ async function main(): Promise<void> {
         setF(gl, p.program, p.uniforms, 'frontView', params.frontView ? 1 : 0);
         setF(gl, p.program, p.uniforms, 'topView', params.topView ? 1 : 0);
         setF(gl, p.program, p.uniforms, 'playbackCamera', playbackFrame ? 1 : 0);
+        setV3(gl, p.program, p.uniforms, 'cameraWorld', cam.cameraPos[0], cam.cameraPos[1], cam.cameraPos[2]);
         setV3(
           gl,
           p.program,
@@ -1395,6 +1448,14 @@ async function main(): Promise<void> {
         setF(gl, p.program, p.uniforms, 'adiskNoiseLOD', params.adiskNoiseLOD);
         setF(gl, p.program, p.uniforms, 'adiskNoiseScale', params.adiskNoiseScale);
 
+        // 相对论视觉效应 uniforms
+        setF(gl, p.program, p.uniforms, 'dopplerEnabled', params.dopplerEnabled ? 1 : 0);
+        setF(gl, p.program, p.uniforms, 'dopplerStrength', params.dopplerStrength);
+        setF(gl, p.program, p.uniforms, 'dopplerBeta', params.dopplerBeta);
+        setF(gl, p.program, p.uniforms, 'beamingEnabled', params.beamingEnabled ? 1 : 0);
+        setF(gl, p.program, p.uniforms, 'beamingPower', params.beamingPower);
+        setF(gl, p.program, p.uniforms, 'spinEnabled', params.spinEnabled ? 1 : 0);
+        setF(gl, p.program, p.uniforms, 'spinA', params.spinA);
         let effectiveAdiskSpeed = params.adiskSpeed;
         if (scene.timeWarp.enabled && scene.bodyCount >= 1) {
           const b0 = scene.bodies[0]!;
