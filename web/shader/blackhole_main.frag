@@ -52,6 +52,17 @@ uniform vec3 adiskOrigin;
 uniform float adiskDiskSize;
 uniform float adiskDiskGain;
 
+// === 相对论视觉效应 ===
+uniform float dopplerEnabled;
+uniform float dopplerStrength;
+uniform float dopplerBeta;        // 轨道速度/光速 (0-0.5)
+
+uniform float beamingEnabled;
+uniform float beamingPower;       // 聚束指数 (1-6, 物理标准 ~3.5)
+
+uniform float spinEnabled;
+uniform float spinA;              // Kerr 自旋参数 (0-0.998)
+
 struct Ring {
   vec3 center;
   vec3 normal;
@@ -239,7 +250,13 @@ mat3 lookAt(vec3 origin, vec3 target, float roll) {
 
 void adiskColor(vec3 posWorld, inout vec3 color, inout float alpha) {
   vec3 pos = posWorld - adiskOrigin;
-  float innerRadius = 2.6 * adiskDiskSize;
+
+  // === 黑洞自旋：ISCO 半径随 a 收缩（a=0 时 6M，a=1 时 ~1M，近似 Kerr 顺旋 ISCO）===
+  float innerScale = 2.6;
+  if (spinEnabled > 0.5) {
+    innerScale = mix(2.6, 1.0, clamp(spinA, 0.0, 0.998));
+  }
+  float innerRadius = innerScale * adiskDiskSize;
   float outerRadius = 12.0 * adiskDiskSize;
   float hDisk = max(adiskHeight * adiskDiskSize, EPSILON);
 
@@ -284,6 +301,58 @@ void adiskColor(vec3 posWorld, inout vec3 color, inout float alpha) {
 
   vec3 dustColor =
       texture(colorMap, vec2(sphericalCoord.x / outerRadius, 0.5)).rgb;
+
+  // === 相对论视觉因子：多普勒色偏 + 束宽增强 ===
+  // 吸积盘绕 Y 轴旋转：在盘平面上，半径方向 r̂，轨道速度方向 v̂ = (Y × r̂)
+  // 视线方向取相机到采样点的方向（近似），径向速度分量决定红/蓝移
+  float dopplerFactor = 1.0;     // 频率比 ν_obs/ν_emit
+  float beamingFactor = 1.0;     // 亮度增益 = D^(3+α)
+  if ((dopplerEnabled > 0.5 || beamingEnabled > 0.5) && length(pos.xz) > EPSILON) {
+    // 盘平面内的半径方向
+    vec3 rHat = normalize(vec3(pos.x, 0.0, pos.z));
+    // 轨道速度方向（开普勒方向，绕 +Y 旋转 -> v = Y × r）
+    vec3 vHat = normalize(cross(vec3(0.0, 1.0, 0.0), rHat));
+
+    // 开普勒速度 ∝ 1/sqrt(r)，归一化到滑条上限 dopplerBeta（β=v/c）
+    float rRel = max(length(pos.xz) / max(innerRadius, EPSILON), 1.0);
+    float beta = clamp(dopplerBeta, 0.0, 0.5) / sqrt(rRel);
+
+    // 自旋下的 frame-dragging 近似：顺旋方向额外加速、逆旋方向减速
+    if (spinEnabled > 0.5) {
+      // 简单的拖曳项，幅度 ∝ a / r²
+      float drag = 0.15 * clamp(spinA, 0.0, 0.998) / max(rRel * rRel, 1.0);
+      beta += drag;
+    }
+    beta = clamp(beta, 0.0, 0.95);
+
+    // 视线方向（相机 → 采样点 → 我们近似为采样点的视径方向）
+    // 注意：traceColor 中是从相机沿 dir 步进，这里没有直接的 viewDir，
+    // 用 sample 到 adiskOrigin 的方向作为代理视线（最常用近似）
+    vec3 viewDir = normalize(adiskOrigin - posWorld);
+
+    // 径向速度（朝向观察者为正）
+    float vDotN = dot(vHat, -viewDir) * beta;        // 取负号让"迎面"为正
+    float gamma = 1.0 / sqrt(max(1.0 - beta * beta, EPSILON));
+    // 相对论多普勒因子 D = 1 / (γ (1 - v·n̂))
+    dopplerFactor = 1.0 / (gamma * max(1.0 - vDotN, EPSILON));
+
+    // 束宽增强：I_obs / I_emit = D^(3+α)，α≈0.5 对热盘
+    beamingFactor = pow(dopplerFactor, max(beamingPower, 0.0));
+  }
+
+  // 多普勒色偏：把频率比转换为 RGB 通道增益（蓝移 → 加蓝减红，红移 → 反之）
+  if (dopplerEnabled > 0.5) {
+    float shift = (dopplerFactor - 1.0) * dopplerStrength;
+    // 蓝通道随 shift 升，红通道反向，绿基本不变
+    vec3 tint = vec3(1.0 - 0.7 * shift, 1.0 - 0.2 * abs(shift), 1.0 + 0.7 * shift);
+    tint = clamp(tint, vec3(0.0), vec3(2.0));
+    dustColor *= tint;
+  }
+
+  // 束宽增强：直接在亮度上乘以 D^p
+  if (beamingEnabled > 0.5) {
+    dustColor *= clamp(beamingFactor, 0.05, 8.0);
+  }
 
   color += density * adiskLit * adiskDiskGain * dustColor * alpha * abs(noise);
 }
