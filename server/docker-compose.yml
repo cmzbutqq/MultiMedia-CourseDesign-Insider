@@ -5,8 +5,8 @@ services:
   gesture-server:
     build: .
     container_name: blackhole-gesture-server
-    ports:
-      - "5000:5000"
+    expose:
+      - "5000"
     environment:
       - CUDA_VISIBLE_DEVICES=-1
     volumes:
@@ -26,8 +26,8 @@ services:
   # gesture-server-gpu:
   #   build: .
   #   container_name: blackhole-gesture-server-gpu
-  #   ports:
-  #     - "5001:5000"
+  #   expose:
+  #     - "5000"
   #   environment:
   #     - NVIDIA_VISIBLE_DEVICES=all
   #     - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video

@@ -46,6 +46,9 @@ app.config['MAX_CONTENT_LENGTH'] = int(
 MAX_IMAGE_PIXELS = int(os.environ.get('MAX_IMAGE_PIXELS', str(1920 * 1080)))
 MAX_CLIENTS = int(os.environ.get('MAX_CLIENTS', '32'))
 MAX_FRAMES_PER_CLIENT_PER_SECOND = int(os.environ.get('MAX_FRAMES_PER_CLIENT_PER_SECOND', '30'))
+MAX_RATE_LIMIT_CLIENTS = int(os.environ.get('MAX_RATE_LIMIT_CLIENTS', '4096'))
+RATE_LIMIT_ENTRY_TTL_SECONDS = float(os.environ.get('RATE_LIMIT_ENTRY_TTL_SECONDS', '60'))
+TRUST_PROXY_HEADERS = os.environ.get('TRUST_PROXY_HEADERS', '').lower() in {'1', 'true', 'yes'}
 
 
 MAX_ROOM_NAME_LENGTH = int(os.environ.get('MAX_ROOM_NAME_LENGTH', '64'))
@@ -115,14 +118,37 @@ def _validate_image_dimensions(image_data: bytes) -> None:
 
 
 def _client_rate_key() -> str:
-    forwarded_for = request.headers.get('X-Forwarded-For', '')
-    if forwarded_for:
-        return forwarded_for.split(',', 1)[0].strip()
+    if TRUST_PROXY_HEADERS:
+        real_ip = request.headers.get('X-Real-IP', '').strip()
+        if real_ip:
+            return real_ip
     return request.remote_addr or getattr(request, 'sid', None) or 'unknown'
+
+
+def _prune_rate_limits(now: float) -> None:
+    stale_keys = [
+        client_id
+        for client_id, bucket in rate_limits.items()
+        if now - bucket['window_start'] > RATE_LIMIT_ENTRY_TTL_SECONDS
+    ]
+    for client_id in stale_keys:
+        rate_limits.pop(client_id, None)
+
+    if len(rate_limits) <= MAX_RATE_LIMIT_CLIENTS:
+        return
+
+    overflow = len(rate_limits) - MAX_RATE_LIMIT_CLIENTS
+    oldest_keys = sorted(
+        rate_limits,
+        key=lambda client_id: rate_limits[client_id]['window_start'],
+    )[:overflow]
+    for client_id in oldest_keys:
+        rate_limits.pop(client_id, None)
 
 
 def _check_frame_rate_limit(client_id: str) -> Optional[float]:
     now = time.monotonic()
+    _prune_rate_limits(now)
     bucket = rate_limits.get(client_id)
     if bucket is None or now - bucket['window_start'] >= 1.0:
         rate_limits[client_id] = {'window_start': now, 'count': 1.0}
