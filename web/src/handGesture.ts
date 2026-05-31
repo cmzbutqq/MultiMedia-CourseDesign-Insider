@@ -144,6 +144,7 @@ export class HandGestureController {
         }
       } catch (err) {
         console.error('[HandGesture] 摄像头初始化失败:', err);
+        this.stopVideoStream();
         return false;
       }
 
@@ -152,6 +153,7 @@ export class HandGestureController {
       return true;
     } catch (error) {
       console.error('[HandGesture] 初始化失败:', error);
+      this.stopVideoStream();
       return false;
     }
   }
@@ -339,6 +341,13 @@ export class HandGestureController {
     };
   }
 
+  private stopVideoStream(): void {
+    if (!this.videoElement?.srcObject) return;
+    const stream = this.videoElement.srcObject as MediaStream;
+    stream.getTracks().forEach((track) => track.stop());
+    this.videoElement.srcObject = null;
+  }
+
   async processFrame(): Promise<void> {
     if (!this.enabled || !this.hands || !this.videoElement) return;
 
@@ -359,6 +368,7 @@ export class HandGestureController {
 
   destroy(): void {
     this.enabled = false;
+    this.stopVideoStream();
     if (this.hands) {
       try {
         this.hands.close();

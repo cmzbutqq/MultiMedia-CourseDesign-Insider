@@ -44,6 +44,8 @@ export class ServerGestureClient {
   private maxPendingRequests: number = 2;
   private readonly activeControllers: Set<AbortController> = new Set();
   private readonly preferRelativeUrls: boolean;
+  private frameCanvas: HTMLCanvasElement | null = null;
+  private frameCanvasCtx: CanvasRenderingContext2D | null = null;
 
   private gestureState: GestureState = {
     palmX: 0.5,
@@ -129,6 +131,10 @@ export class ServerGestureClient {
       if (response.ok) {
         const data = await response.json();
         console.log('[ServerGesture] 服务器连接成功:', data);
+        if (!data.gesture_detector_initialized) {
+          console.error('[ServerGesture] 服务器已启动，但手势检测器不可用');
+          return false;
+        }
         return true;
       }
       
@@ -390,13 +396,17 @@ export class ServerGestureClient {
     }
     this.lastFrameTime = now;
 
-    const canvas = document.createElement('canvas');
     const targetWidth = 160;
     const targetHeight = 120;
-    canvas.width = targetWidth;
-    canvas.height = targetHeight;
+    if (!this.frameCanvas) {
+      this.frameCanvas = document.createElement('canvas');
+      this.frameCanvas.width = targetWidth;
+      this.frameCanvas.height = targetHeight;
+      this.frameCanvasCtx = this.frameCanvas.getContext('2d');
+    }
 
-    const ctx = canvas.getContext('2d');
+    const canvas = this.frameCanvas;
+    const ctx = this.frameCanvasCtx;
     if (!ctx) return;
 
     ctx.save();
@@ -478,7 +488,10 @@ export class ServerGestureClient {
     if (this.videoElement?.srcObject) {
       const stream = this.videoElement.srcObject as MediaStream;
       stream.getTracks().forEach((track) => track.stop());
+      this.videoElement.srcObject = null;
     }
+    this.frameCanvas = null;
+    this.frameCanvasCtx = null;
     this.callbacks = [];
     this.isInitialized = false;
     console.log('[ServerGesture] 已销毁');

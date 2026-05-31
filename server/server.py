@@ -43,19 +43,23 @@ MAX_SOCKETIO_BUFFER_SIZE = int(
 app.config['MAX_CONTENT_LENGTH'] = int(
     os.environ.get('MAX_CONTENT_LENGTH', str(MAX_IMAGE_BASE64_CHARS + 1024))
 )
+MAX_IMAGE_PIXELS = int(os.environ.get('MAX_IMAGE_PIXELS', str(1920 * 1080)))
+MAX_CLIENTS = int(os.environ.get('MAX_CLIENTS', '32'))
+MAX_FRAMES_PER_CLIENT_PER_SECOND = int(os.environ.get('MAX_FRAMES_PER_CLIENT_PER_SECOND', '30'))
 
 
 MAX_ROOM_NAME_LENGTH = int(os.environ.get('MAX_ROOM_NAME_LENGTH', '64'))
 MAX_ROOMS_PER_CLIENT = int(os.environ.get('MAX_ROOMS_PER_CLIENT', '5'))
 ALLOWED_ROOM_CHARS = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_')
+rate_limits: Dict[str, Dict[str, float]] = {}
 
 _cors_origins = [
-    os.environ.get('CORS_ORIGIN', 'http://localhost:5173'),
+    os.environ.get('CORS_ORIGIN', 'http://localhost:5174'),
 ]
 CORS(app, origins=[o for o in _cors_origins if o])
 
 socketio = SocketIO(app,
-    cors_allowed_origins=os.environ.get('SOCKETIO_ORIGINS', 'http://localhost:5173').split(','),
+    cors_allowed_origins=os.environ.get('SOCKETIO_ORIGINS', 'http://localhost:5174').split(','),
     async_mode='eventlet',
     max_http_buffer_size=MAX_SOCKETIO_BUFFER_SIZE
 )
@@ -94,6 +98,41 @@ def _decode_image_payload(image_b64: Any) -> bytes:
         return base64.b64decode(payload, validate=True)
     except (binascii.Error, ValueError) as exc:
         raise ValueError('image 不是有效的 base64 编码') from exc
+
+
+def _validate_image_dimensions(image_data: bytes) -> None:
+    """Reject compressed images that expand beyond the configured pixel budget."""
+    try:
+        with Image.open(io.BytesIO(image_data)) as image:
+            width, height = image.size
+    except Exception as exc:
+        raise ValueError('无法解码图片') from exc
+
+    if width <= 0 or height <= 0:
+        raise ValueError('图片尺寸无效')
+    if width * height > MAX_IMAGE_PIXELS:
+        raise ValueError(f'图片尺寸过大，最大允许 {MAX_IMAGE_PIXELS} 像素')
+
+
+def _client_rate_key() -> str:
+    forwarded_for = request.headers.get('X-Forwarded-For', '')
+    if forwarded_for:
+        return forwarded_for.split(',', 1)[0].strip()
+    return request.remote_addr or getattr(request, 'sid', None) or 'unknown'
+
+
+def _check_frame_rate_limit(client_id: str) -> Optional[float]:
+    now = time.monotonic()
+    bucket = rate_limits.get(client_id)
+    if bucket is None or now - bucket['window_start'] >= 1.0:
+        rate_limits[client_id] = {'window_start': now, 'count': 1.0}
+        return None
+
+    if bucket['count'] >= MAX_FRAMES_PER_CLIENT_PER_SECOND:
+        return max(0.1, 1.0 - (now - bucket['window_start']))
+
+    bucket['count'] += 1.0
+    return None
 
 @app.errorhandler(413)
 def request_too_large(_error):
@@ -255,7 +294,7 @@ class GestureDetector:
             logger.error(f"处理帧时出错: {e}")
             return {
                 'success': False,
-                'error': str(e),
+                'error': '处理帧失败',
                 'landmarks': [],
                 'gesture': asdict(GestureState())
             }
@@ -324,12 +363,11 @@ clients: Dict[str, Any] = {}
 def health():
     """健康检查端点"""
     detector_ready = bool(gesture_detector and getattr(gesture_detector, 'initialized', False))
-    status_code = 200 if detector_ready else 503
-    status = 'healthy' if detector_ready else 'unhealthy'
+    status = 'healthy' if detector_ready else 'degraded'
     return jsonify({
         'status': status,
         'gesture_detector_initialized': detector_ready
-    }), status_code
+    }), 200
 
 @app.route('/api/detect', methods=['POST'])
 def detect_hand():
@@ -345,8 +383,13 @@ def detect_hand():
         if gesture_detector is None:
             return jsonify({'error': '检测器未初始化'}), 503
 
+        retry_after = _check_frame_rate_limit(_client_rate_key())
+        if retry_after is not None:
+            return jsonify({'error': '请求过于频繁'}), 429, {'Retry-After': f'{retry_after:.1f}'}
+
         try:
             image_data = _decode_image_payload(data['image'])
+            _validate_image_dimensions(image_data)
         except ValueError as exc:
             err = str(exc)
             status = 413 if '过大' in err else 400
@@ -360,12 +403,15 @@ def detect_hand():
         return jsonify({'error': '请求体不是合法 JSON'}), 400
     except Exception as e:
         logger.error(f"API 处理错误: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': '服务器内部错误'}), 500
 
 @socketio.on('connect')
 def handle_connect():
     """处理客户端连接"""
     client_id = request.sid
+    if len(clients) >= MAX_CLIENTS:
+        logger.warning("拒绝客户端连接，当前连接数已达上限: %s", MAX_CLIENTS)
+        return False
     logger.info(f"客户端连接: {client_id}")
     clients[client_id] = {
         'connected_at': time.time(),
@@ -404,12 +450,18 @@ def handle_video_frame(data):
 
         data = _validate_socket_payload(data)
 
+        retry_after = _check_frame_rate_limit(client_id)
+        if retry_after is not None:
+            emit('frame_error', {'error': '请求过于频繁', 'retry_after': retry_after})
+            return
+
         if 'image' not in data:
             emit('frame_error', {'error': '缺少 image 字段'})
             return
 
         try:
             image_data = _decode_image_payload(data['image'])
+            _validate_image_dimensions(image_data)
         except ValueError as exc:
             emit('frame_error', {'error': str(exc)})
             return
@@ -429,7 +481,7 @@ def handle_video_frame(data):
             
     except Exception as e:
         logger.error(f"处理帧时出错 ({client_id}): {e}")
-        emit('frame_error', {'error': str(e)})
+        emit('frame_error', {'error': '处理帧失败'})
 
 @socketio.on('subscribe')
 def handle_subscribe(data):

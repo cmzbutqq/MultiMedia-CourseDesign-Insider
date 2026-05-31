@@ -41,7 +41,7 @@ npm run dev
 
 默认访问地址：
 
-- [http://localhost:5173](http://localhost:5173)
+- [http://localhost:5174](http://localhost:5174)
 
 构建生产版本：
 
@@ -65,7 +65,7 @@ docker compose up --build -d
 
 - http前端：[http://localhost:8080](http://localhost:8080) (http可能无法调用摄像头)
 - https前端：[https://localhost:8443](https://localhost:8443)
-- 手势服务器：[http://localhost:5000](http://localhost:5000)
+- 手势服务器：由前端容器通过内部网络代理，不再直接暴露 5000 端口
 
 停止容器：
 
