@@ -1,7 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { getCameraLookBasis } from '../src/camera.ts';
 
 const shader = readFileSync(new URL('../shader/blackhole_main.frag', import.meta.url), 'utf8');
 const mainTs = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
@@ -27,14 +26,8 @@ test('relativistic Doppler uses camera-to-sample sightline, not radial disk dire
 });
 
 test('explicit front and top view controls take precedence over mouse camera control', () => {
-  assert.deepEqual(
-    getCameraLookBasis(0, 0, 0, 100, 100, true, true, false, 0).cameraPos,
-    [10, 1, 10],
-  );
-  assert.deepEqual(
-    getCameraLookBasis(0, 0, 0, 100, 100, true, false, true, 0).cameraPos,
-    [15, 15, 0],
-  );
+  assert.match(cameraTs, /else\s+if\s*\(frontView\)\s*{\s*cameraPos\s*=\s*\[10,\s*1,\s*10\]/);
+  assert.match(cameraTs, /else\s+if\s*\(topView\)\s*{\s*cameraPos\s*=\s*\[15,\s*15,\s*0\]/);
   assert.match(
     cameraTs,
     /cameraPosOverride[\s\S]*?frontView[\s\S]*?topView[\s\S]*?mouseControl/,

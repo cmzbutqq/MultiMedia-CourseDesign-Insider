@@ -22,6 +22,7 @@ services:
       - CUDA_VISIBLE_DEVICES=-1
       - CORS_ORIGIN=http://localhost:8080
       - SOCKETIO_ORIGINS=http://localhost:8080,https://localhost:8443
+      - TRUST_PROXY_HEADERS=true
     volumes:
       - ./server/data:/app/data
       - ./server/logs:/app/logs

@@ -141,7 +141,7 @@ class HealthEndpointTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "图片尺寸过大"):
             module._validate_image_dimensions(b"not-a-real-image")
 
-    def test_detect_rate_limits_burst_requests(self):
+    def test_detect_rate_limit_ignores_spoofed_forwarded_for(self):
         module = _load_server_module()
         module.gesture_detector = types.SimpleNamespace(initialized=True)
         module.rate_limits.clear()
@@ -152,11 +152,24 @@ class HealthEndpointTests(unittest.TestCase):
             response = client.post(
                 "/api/detect",
                 json={"image": "invalid"},
-                headers={"X-Forwarded-For": "203.0.113.10"},
+                headers={"X-Forwarded-For": f"203.0.113.{_}"},
             )
 
         self.assertIsNotNone(response)
         self.assertEqual(response.status_code, 429)
+
+    def test_rate_limit_prunes_stale_entries(self):
+        module = _load_server_module()
+        module.rate_limits.clear()
+        module.rate_limits["stale"] = {
+            "window_start": -module.RATE_LIMIT_ENTRY_TTL_SECONDS - 1,
+            "count": 1.0,
+        }
+
+        module._check_frame_rate_limit("fresh")
+
+        self.assertNotIn("stale", module.rate_limits)
+        self.assertIn("fresh", module.rate_limits)
 
 
 if __name__ == "__main__":
