@@ -5,6 +5,12 @@ import unittest
 
 
 def _install_optional_dependency_stubs() -> None:
+    numpy_mod = types.ModuleType("numpy")
+    numpy_mod.uint8 = int
+    numpy_mod.frombuffer = lambda *args, **kwargs: None
+    numpy_mod.sqrt = lambda value: value ** 0.5
+    sys.modules["numpy"] = numpy_mod
+
     cv2 = types.SimpleNamespace(
         IMREAD_COLOR=1,
         COLOR_BGR2RGB=1,
