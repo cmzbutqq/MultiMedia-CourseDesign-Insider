@@ -556,9 +556,40 @@ async function main(): Promise<void> {
   let handVideo: HTMLVideoElement | null = null;
   let handCanvas: HTMLCanvasElement | null = null;
   let handOverlay: HTMLDivElement | null = null;
+  let gestureStatusOverlay: HTMLDivElement | null = null;
+  let gestureStatusTimer: number | null = null;
   let previousGestureMode: 'off' | 'local' | 'server' = 'off';
   let gestureInitToken = 0;
   let gestureSwitchQueue: Promise<void> = Promise.resolve();
+
+  function clearGestureStatusMessage(): void {
+    if (gestureStatusTimer !== null) {
+      window.clearTimeout(gestureStatusTimer);
+      gestureStatusTimer = null;
+    }
+    gestureStatusOverlay?.remove();
+    gestureStatusOverlay = null;
+  }
+
+  function showGestureStatusMessage(message: string, isError = false): void {
+    clearGestureStatusMessage();
+    gestureStatusOverlay = document.createElement('div');
+    gestureStatusOverlay.style.cssText = [
+      'position:fixed',
+      'bottom:260px',
+      'left:10px',
+      'padding:8px 12px',
+      'background:rgba(0,0,0,0.8)',
+      `color:${isError ? '#ff6666' : '#00ff00'}`,
+      'border-radius:4px',
+      'font-size:12px',
+      'font-family:monospace',
+      'z-index:1000',
+    ].join(';');
+    gestureStatusOverlay.textContent = message;
+    document.body.appendChild(gestureStatusOverlay);
+    gestureStatusTimer = window.setTimeout(clearGestureStatusMessage, 5000);
+  }
 
   function cleanupGestureResources(removeDom = true): void {
     if (handGestureController) {
@@ -1057,11 +1088,13 @@ async function main(): Promise<void> {
 
         if (targetMode === 'off') {
           cleanupGestureResources(true);
+          clearGestureStatusMessage();
           previousGestureMode = 'off';
           return;
         }
 
         cleanupGestureResources(true);
+        clearGestureStatusMessage();
         const success = await initHandGesture(targetMode);
         const isStaleSwitch = modeSwitchToken !== gestureInitToken || params.gestureMode !== targetMode;
         if (isStaleSwitch) {
@@ -1071,6 +1104,7 @@ async function main(): Promise<void> {
 
         if (!success) {
           cleanupGestureResources(true);
+          showGestureStatusMessage('手势: 初始化失败，已恢复为关闭', true);
           params.gestureMode = 'off';
           previousGestureMode = 'off';
           gestureModeCtrl.updateDisplay();
@@ -1081,6 +1115,7 @@ async function main(): Promise<void> {
         params.frontView = false;
         params.topView = false;
         updateViewControlDisplay();
+        clearGestureStatusMessage();
         previousGestureMode = targetMode;
         if (targetMode === 'server' && serverGestureClient) {
           serverGestureClient.enable();

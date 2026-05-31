@@ -51,6 +51,7 @@ test('recording render state preserves relativistic visual parameters', () => {
 test('gesture init failure rolls GUI state back to off', () => {
   assert.match(mainTs, /const\s+gestureModeCtrl\s*=\s*gui\.add\(params,\s*['"]gestureMode['"]/);
   assert.match(mainTs, /if\s*\(!success\)\s*{[\s\S]*?params\.gestureMode\s*=\s*['"]off['"][\s\S]*?gestureModeCtrl\.updateDisplay\(\)/);
+  assert.match(mainTs, /showGestureStatusMessage\(\s*['"]手势: 初始化失败，已恢复为关闭['"],\s*true\s*\)/);
   assert.match(mainTs, /params\.mouseControl\s*=\s*true[\s\S]*?updateViewControlDisplay\(\)/);
 });
 
