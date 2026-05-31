@@ -14,8 +14,22 @@ def _install_optional_dependency_stubs() -> None:
     )
     sys.modules["cv2"] = cv2
 
+    class _ImageModule:
+        @staticmethod
+        def open(_stream):
+            class _Image:
+                size = (320, 240)
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_args):
+                    return False
+
+            return _Image()
+
     pil_mod = types.ModuleType("PIL")
-    pil_mod.Image = object
+    pil_mod.Image = _ImageModule
     sys.modules["PIL"] = pil_mod
 
     mp = types.ModuleType("mediapipe")
@@ -72,17 +86,17 @@ def _load_server_module():
 
 
 class HealthEndpointTests(unittest.TestCase):
-    def test_health_is_unhealthy_when_detector_uninitialized(self):
+    def test_health_is_degraded_when_detector_uninitialized(self):
         module = _load_server_module()
         module.gesture_detector = None
 
         client = module.app.test_client()
         response = client.get("/health")
 
-        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.status_code, 200)
         self.assertEqual(
             response.get_json(),
-            {"status": "unhealthy", "gesture_detector_initialized": False},
+            {"status": "degraded", "gesture_detector_initialized": False},
         )
 
     def test_detect_returns_400_for_invalid_json_payload(self):
@@ -98,6 +112,45 @@ class HealthEndpointTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("error", response.get_json())
+
+    def test_dimension_guard_rejects_decompression_bomb(self):
+        module = _load_server_module()
+
+        class OversizedImageModule:
+            @staticmethod
+            def open(_stream):
+                class _Image:
+                    size = (module.MAX_IMAGE_PIXELS + 1, 1)
+
+                    def __enter__(self):
+                        return self
+
+                    def __exit__(self, *_args):
+                        return False
+
+                return _Image()
+
+        module.Image = OversizedImageModule
+
+        with self.assertRaisesRegex(ValueError, "图片尺寸过大"):
+            module._validate_image_dimensions(b"not-a-real-image")
+
+    def test_detect_rate_limits_burst_requests(self):
+        module = _load_server_module()
+        module.gesture_detector = types.SimpleNamespace(initialized=True)
+        module.rate_limits.clear()
+
+        client = module.app.test_client()
+        response = None
+        for _ in range(module.MAX_FRAMES_PER_CLIENT_PER_SECOND + 1):
+            response = client.post(
+                "/api/detect",
+                json={"image": "invalid"},
+                headers={"X-Forwarded-For": "203.0.113.10"},
+            )
+
+        self.assertIsNotNone(response)
+        self.assertEqual(response.status_code, 429)
 
 
 if __name__ == "__main__":

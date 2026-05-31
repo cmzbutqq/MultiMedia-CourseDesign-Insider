@@ -7,6 +7,7 @@ const shader = readFileSync(new URL('../shader/blackhole_main.frag', import.meta
 const mainTs = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
 const cameraTs = readFileSync(new URL('../src/camera.ts', import.meta.url), 'utf8');
 const recordingManagerTs = readFileSync(new URL('../src/recordingManager.ts', import.meta.url), 'utf8');
+const handGestureTs = readFileSync(new URL('../src/handGesture.ts', import.meta.url), 'utf8');
 
 const relativisticFields = [
   'dopplerEnabled',
@@ -52,4 +53,17 @@ test('recording render state preserves relativistic visual parameters', () => {
     assert.match(recordingManagerTs, new RegExp(`${field}:\\s*params\\.${field}`));
     assert.match(recordingManagerTs, new RegExp(`${field}:\\s*frame\\.render\\.${field}`));
   }
+});
+
+test('gesture init failure rolls GUI state back to off', () => {
+  assert.match(mainTs, /const\s+gestureModeCtrl\s*=\s*gui\.add\(params,\s*['"]gestureMode['"]/);
+  assert.match(mainTs, /if\s*\(!success\)\s*{[\s\S]*?params\.gestureMode\s*=\s*['"]off['"][\s\S]*?gestureModeCtrl\.updateDisplay\(\)/);
+  assert.match(mainTs, /params\.mouseControl\s*=\s*true[\s\S]*?updateViewControlDisplay\(\)/);
+});
+
+test('local gesture teardown stops camera tracks', () => {
+  assert.match(handGestureTs, /private\s+stopVideoStream\(\)/);
+  assert.match(handGestureTs, /stream\.getTracks\(\)\.forEach\(\(track\)\s*=>\s*track\.stop\(\)\)/);
+  assert.match(handGestureTs, /this\.videoElement\.srcObject\s*=\s*null/);
+  assert.match(handGestureTs, /destroy\(\):\s*void\s*{[\s\S]*?this\.stopVideoStream\(\)/);
 });

@@ -1042,11 +1042,12 @@ async function main(): Promise<void> {
       updateViewControlDisplay();
     }
   });
-  gui.add(params, 'gestureMode', {
+  const gestureModeCtrl = gui.add(params, 'gestureMode', {
     '关闭': 'off',
     '本地计算': 'local',
     '服务器计算': 'server',
-  }).name('手势识别').onChange(() => {
+  }).name('手势识别');
+  gestureModeCtrl.onChange(() => {
     const modeSwitchToken = ++gestureInitToken;
     gestureSwitchQueue = gestureSwitchQueue
       .then(async () => {
@@ -1070,10 +1071,16 @@ async function main(): Promise<void> {
 
         if (!success) {
           cleanupGestureResources(true);
+          params.gestureMode = 'off';
           previousGestureMode = 'off';
+          gestureModeCtrl.updateDisplay();
           return;
         }
 
+        params.mouseControl = true;
+        params.frontView = false;
+        params.topView = false;
+        updateViewControlDisplay();
         previousGestureMode = targetMode;
         if (targetMode === 'server' && serverGestureClient) {
           serverGestureClient.enable();
