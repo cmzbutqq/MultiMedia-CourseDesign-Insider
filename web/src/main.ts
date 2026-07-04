@@ -63,7 +63,9 @@ import bloomDownFrag from '../shader/bloom_downsample.frag?raw';
 import bloomUpFrag from '../shader/bloom_upsample.frag?raw';
 import bloomCompositeFrag from '../shader/bloom_composite.frag?raw';
 import tonemappingFrag from '../shader/tonemapping.frag?raw';
-import passthroughFrag from '../shader/passthrough.frag?raw';
+import upscaleFrag from '../shader/upscale.frag?raw';
+import fsr1EasuFrag from '../shader/fsr1_easu.frag?raw';
+import fsr1RcasFrag from '../shader/fsr1_rcas.frag?raw';
 import fxaaFrag from '../shader/fxaa.frag?raw';
 import taaBlendFrag from '../shader/taa_blend.frag?raw';
 
@@ -74,9 +76,12 @@ const DEFAULT_CAMERA_ZOOM = 1;
 const MIN_CAMERA_ZOOM = 0.15;
 const MAX_CAMERA_ZOOM = 2.4;
 const ZOOM_WHEEL_SENSITIVITY = 0.0015;
+const MIN_RENDER_SCALE = 0.35;
+const MAX_RENDER_SCALE = 1.5;
 
 type AntialiasMode = 'off' | 'fxaa' | 'taa';
 type GestureMode = 'off' | 'local' | 'server';
+type UpscaleMode = 'bicubic' | 'lanczos' | 'fsr1';
 
 interface PipelineAllocResult {
   pipeline: PipelineRTs;
@@ -133,6 +138,9 @@ interface Params {
   bloomStrength: number;
   tonemappingEnabled: boolean;
   gamma: number;
+  renderScale: number;
+  upscaleMode: UpscaleMode;
+  fsrSharpness: number;
 }
 
 const params: Params = {
@@ -168,6 +176,9 @@ const params: Params = {
   bloomStrength: 0.1,
   tonemappingEnabled: true,
   gamma: 2.5,
+  renderScale: 1,
+  upscaleMode: 'fsr1',
+  fsrSharpness: 0.2,
 };
 
 interface PipelineRTs {
@@ -181,8 +192,11 @@ interface PipelineRTs {
   taaBuffers: [ColorRT, ColorRT] | null;
   tonemapped: ColorRT;
   output: ColorRT;
+  fsrEasu: ColorRT;
   width: number;
   height: number;
+  displayWidth: number;
+  displayHeight: number;
   format: ColorRTFormat;
 }
 
@@ -199,6 +213,7 @@ function destroyPipeline(gl: WebGL2RenderingContext, p: PipelineRTs | null): voi
   }
   destroyColorRT(gl, p.tonemapped);
   destroyColorRT(gl, p.output);
+  destroyColorRT(gl, p.fsrEasu);
   for (const rt of p.down) destroyColorRT(gl, rt);
   for (const rt of p.up) destroyColorRT(gl, rt);
 }
@@ -207,6 +222,8 @@ function allocPipeline(
   gl: WebGL2RenderingContext,
   width: number,
   height: number,
+  displayWidth: number,
+  displayHeight: number,
   format: ColorRTFormat,
   aaMode: AntialiasMode,
   msaaSamples: number,
@@ -223,6 +240,7 @@ function allocPipeline(
   const bloomFinal = createColorRT(gl, width, height, format);
   const tonemapped = createColorRT(gl, width, height, format);
   const output = createColorRT(gl, width, height, format);
+  const fsrEasu = createColorRT(gl, displayWidth, displayHeight, format);
   const taaBuffers: [ColorRT, ColorRT] | null = aaMode === 'taa'
     ? [createColorRT(gl, width, height, format), createColorRT(gl, width, height, format)]
     : null;
@@ -236,20 +254,39 @@ function allocPipeline(
     const uh = Math.max(1, height >> i);
     up.push(createColorRT(gl, uw, uh, format));
   }
-  return { main, mainMsaa, mainResolved, brightness, down, up, bloomFinal, taaBuffers, tonemapped, output, width, height, format };
+  return {
+    main,
+    mainMsaa,
+    mainResolved,
+    brightness,
+    down,
+    up,
+    bloomFinal,
+    taaBuffers,
+    tonemapped,
+    output,
+    fsrEasu,
+    width,
+    height,
+    displayWidth,
+    displayHeight,
+    format,
+  };
 }
 
 function tryAllocPipeline(
   gl: WebGL2RenderingContext,
   width: number,
   height: number,
+  displayWidth: number,
+  displayHeight: number,
   aaMode: AntialiasMode,
   msaaSamples: number,
 ): PipelineAllocResult {
   const preferred = detectRTFormat(gl);
   try {
     return {
-      pipeline: allocPipeline(gl, width, height, preferred, aaMode, msaaSamples),
+      pipeline: allocPipeline(gl, width, height, displayWidth, displayHeight, preferred, aaMode, msaaSamples),
       format: preferred,
       effectiveAaMode: aaMode,
     };
@@ -259,7 +296,7 @@ function tryAllocPipeline(
     if (preferred === 'float16') {
       try {
         return {
-          pipeline: allocPipeline(gl, width, height, 'rgba8', aaMode, msaaSamples),
+          pipeline: allocPipeline(gl, width, height, displayWidth, displayHeight, 'rgba8', aaMode, msaaSamples),
           format: 'rgba8',
           effectiveAaMode: aaMode,
         };
@@ -276,7 +313,7 @@ function tryAllocPipeline(
       if (maxSamples > 0) {
         try {
           console.warn('[blackhole-web] Retrying TAA with reduced MSAA samples');
-          const p = allocPipeline(gl, width, height, 'rgba8', 'taa', 1);
+          const p = allocPipeline(gl, width, height, displayWidth, displayHeight, 'rgba8', 'taa', 1);
           return { pipeline: p, format: 'rgba8', effectiveAaMode: 'taa' };
         } catch (e3) {
           console.warn('[blackhole-web] TAA with 1 sample also failed:', e3);
@@ -288,7 +325,7 @@ function tryAllocPipeline(
       try {
         console.warn('[blackhole-web] Trying FXAA as final fallback');
         return {
-          pipeline: allocPipeline(gl, width, height, 'rgba8', 'fxaa', 0),
+          pipeline: allocPipeline(gl, width, height, displayWidth, displayHeight, 'rgba8', 'fxaa', 0),
           format: 'rgba8',
           effectiveAaMode: 'fxaa',
         };
@@ -300,7 +337,7 @@ function tryAllocPipeline(
     if (aaMode === 'taa') {
       try {
         return {
-          pipeline: allocPipeline(gl, width, height, 'rgba8', 'fxaa', 0),
+          pipeline: allocPipeline(gl, width, height, displayWidth, displayHeight, 'rgba8', 'fxaa', 0),
           format: 'rgba8',
           effectiveAaMode: 'fxaa',
         };
@@ -309,7 +346,7 @@ function tryAllocPipeline(
       }
       try {
         return {
-          pipeline: allocPipeline(gl, width, height, 'rgba8', 'off', 0),
+          pipeline: allocPipeline(gl, width, height, displayWidth, displayHeight, 'rgba8', 'off', 0),
           format: 'rgba8',
           effectiveAaMode: 'off',
         };
@@ -519,6 +556,48 @@ function clampNumber(value: number, min: number, max: number): number {
 function wrapUnitInterval(value: number): number {
   const wrapped = value % 1;
   return wrapped < 0 ? wrapped + 1 : wrapped;
+}
+
+function deriveNBodyGFromCentralMu(gmCentral: number, centralMass: number): number {
+  return clampNumber(gmCentral / Math.max(centralMass, 1e-6), 0.1, 20);
+}
+
+function deriveCentralMuFromNBodyG(nbodyG: number, centralMass: number): number {
+  return clampNumber(nbodyG * Math.max(centralMass, 1e-6), 1, 500);
+}
+
+function rebalanceCentralMomentum(scene: SceneState): void {
+  if (scene.bodyCount < 2) return;
+  const centralMass = Math.max(scene.bodies[0]!.mass, 1e-6);
+  let px = 0;
+  let py = 0;
+  let pz = 0;
+  for (let i = 1; i < scene.bodyCount; i++) {
+    const body = scene.bodies[i]!;
+    px += body.mass * body.velocity[0];
+    py += body.mass * body.velocity[1];
+    pz += body.mass * body.velocity[2];
+  }
+  scene.bodies[0]!.velocity[0] = -px / centralMass;
+  scene.bodies[0]!.velocity[1] = -py / centralMass;
+  scene.bodies[0]!.velocity[2] = -pz / centralMass;
+}
+
+function adaptSceneForDynamicsSwitch(scene: SceneState, previous: SceneState['dynamics'], next: SceneState['dynamics']): void {
+  if (previous === next) return;
+
+  if (previous === 'kepler' && next === 'nbody') {
+    scene.nbodyG = deriveNBodyGFromCentralMu(scene.gmCentral, scene.bodies[0]!.mass);
+    rebalanceCentralMomentum(scene);
+    return;
+  }
+
+  if (previous === 'nbody' && next === 'kepler') {
+    scene.gmCentral = deriveCentralMuFromNBodyG(scene.nbodyG, scene.bodies[0]!.mass);
+    scene.bodies[0]!.velocity[0] = 0;
+    scene.bodies[0]!.velocity[1] = 0;
+    scene.bodies[0]!.velocity[2] = 0;
+  }
 }
 
 function installGuiStyles(): void {
@@ -742,11 +821,16 @@ async function main(): Promise<void> {
       tonemap: makePass(gl, simpleVert, tonemappingFrag),
       fxaa: makePass(gl, simpleVert, fxaaFrag),
       taaBlend: makePass(gl, simpleVert, taaBlendFrag),
-      passthrough: makePass(gl, simpleVert, passthroughFrag),
+      upscale: makePass(gl, simpleVert, upscaleFrag),
+      fsrEasu: makePass(gl, simpleVert, fsr1EasuFrag),
+      fsrRcas: makePass(gl, simpleVert, fsr1RcasFrag),
     }),
   ]);
 
-  setI1(gl, passes.passthrough.program, passes.passthrough.uniforms, 'texture0', 0);
+  setI1(gl, passes.upscale.program, passes.upscale.uniforms, 'texture0', 0);
+  setI1(gl, passes.fsrEasu.program, passes.fsrEasu.uniforms, 'texture0', 0);
+  setI1(gl, passes.fsrRcas.program, passes.fsrRcas.uniforms, 'texture0', 0);
+  setF(gl, passes.fsrRcas.program, passes.fsrRcas.uniforms, 'sharpnessStops', params.fsrSharpness);
   setI1(gl, passes.fxaa.program, passes.fxaa.uniforms, 'texture0', 0);
   setI1(gl, passes.fxaa.program, passes.fxaa.uniforms, 'fxaaQuality', params.fxaaQuality);
   setF(gl, passes.taaBlend.program, passes.taaBlend.uniforms, 'taaFeedback', params.taaFeedback);
@@ -1088,6 +1172,8 @@ async function main(): Promise<void> {
     | 'resize-observer'
     | 'gui-antialias'
     | 'gui-msaa'
+    | 'gui-render-scale'
+    | 'playback-render-scale'
     | 'startup'
     | null = 'startup';
 
@@ -1109,13 +1195,35 @@ async function main(): Promise<void> {
     trailCanvas.style.height = `${canvas.clientHeight}px`;
   }
 
-  function resizeNow(): void {
+  function getDisplaySize(): { width: number; height: number } {
     const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
-    const w = Math.max(1, Math.floor(canvas.clientWidth * dpr));
-    const h = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+    return {
+      width: Math.max(1, Math.floor(canvas.clientWidth * dpr)),
+      height: Math.max(1, Math.floor(canvas.clientHeight * dpr)),
+    };
+  }
+
+  function getRenderTargetSize(displayWidth: number, displayHeight: number): { width: number; height: number } {
+    return {
+      width: Math.max(1, Math.round(displayWidth * params.renderScale)),
+      height: Math.max(1, Math.round(displayHeight * params.renderScale)),
+    };
+  }
+
+  function resizeNow(): void {
+    const { width: w, height: h } = getDisplaySize();
+    const { width: renderW, height: renderH } = getRenderTargetSize(w, h);
     const needsMsaaRebuild = pipeline && params.msaaSamples !== lastMsaaSamples;
     const needsAaModeRebuild = pipeline && params.antialias !== lastAntialiasMode;
-    if (canvas.width === w && canvas.height === h && pipeline && !needsMsaaRebuild && !needsAaModeRebuild) {
+    const needsRenderScaleRebuild = !pipeline || pipeline.width !== renderW || pipeline.height !== renderH;
+    if (
+      canvas.width === w &&
+      canvas.height === h &&
+      pipeline &&
+      !needsMsaaRebuild &&
+      !needsAaModeRebuild &&
+      !needsRenderScaleRebuild
+    ) {
       resizeTrailCanvas();
       return;
     }
@@ -1129,7 +1237,7 @@ async function main(): Promise<void> {
     canvas.height = h;
     applyOrbitPointerToMouse();
     destroyPipeline(gl, pipeline);
-    const r = tryAllocPipeline(gl, w, h, params.antialias, params.msaaSamples);
+    const r = tryAllocPipeline(gl, renderW, renderH, w, h, params.antialias, params.msaaSamples);
     pipeline = r.pipeline;
     rtFormat = r.format;
     activeAntialiasMode = r.effectiveAaMode;
@@ -1142,7 +1250,9 @@ async function main(): Promise<void> {
     }
   }
 
-  function scheduleResizeNow(source: 'resize-observer' | 'gui-antialias' | 'gui-msaa' | 'startup'): void {
+  function scheduleResizeNow(
+    source: 'resize-observer' | 'gui-antialias' | 'gui-msaa' | 'gui-render-scale' | 'playback-render-scale' | 'startup',
+  ): void {
     pendingResizeSource = source;
     if (rebuildScheduled) return;
     rebuildScheduled = true;
@@ -1201,6 +1311,10 @@ async function main(): Promise<void> {
     enabled: false,
     volume: 0.5,
   };
+  const renderState = {
+    internalResolution: '',
+    displayResolution: '',
+  };
   const presetNames = Object.keys(SCENE_PRESETS) as (keyof typeof SCENE_PRESETS)[];
 
   function getActiveCameraMode(): CameraMode {
@@ -1227,6 +1341,13 @@ async function main(): Promise<void> {
     recordingState.frameCount = status.frameCount;
     recordingState.durationLabel = `${status.duration.toFixed(1)}s`;
     recordingState.playbackProgress = status.playbackProgress;
+  }
+
+  function syncRenderSummary(): void {
+    const { width: displayWidth, height: displayHeight } = getDisplaySize();
+    const { width: renderWidth, height: renderHeight } = getRenderTargetSize(displayWidth, displayHeight);
+    renderState.displayResolution = `${displayWidth} × ${displayHeight}`;
+    renderState.internalResolution = `${renderWidth} × ${renderHeight}`;
   }
 
   function refreshGuiDisplays(): void {
@@ -1309,8 +1430,12 @@ async function main(): Promise<void> {
     .add(uiScene, 'dynamics', { 静态: 'static', 开普勒: 'kepler', 'N 体': 'nbody' })
     .name('动力学')
     .onChange((v: SceneState['dynamics']) => {
+      const previous = scene.dynamics;
       scene.dynamics = v;
-      refreshGuiLayout();
+      adaptSceneForDynamicsSwitch(scene, previous, v);
+      syncUiSceneFromScene(uiScene, scene);
+      trails.reset();
+      refreshGuiDisplays();
     });
   const gmCentralCtrl = simulationFolder
     .add(uiScene, 'gmCentral', 1, 500)
@@ -1424,6 +1549,39 @@ async function main(): Promise<void> {
     .name('画面滚转');
 
   const renderFolder = gui.addFolder('画面与特效');
+
+  const resolutionFolder = renderFolder.addFolder('渲染分辨率');
+  resolutionFolder
+    .add(params, 'renderScale', MIN_RENDER_SCALE, MAX_RENDER_SCALE, 0.05)
+    .name('渲染倍率')
+    .onChange(() => {
+      scheduleResizeNow('gui-render-scale');
+      refreshGuiDisplays();
+    });
+  const upscaleModeCtrl = resolutionFolder
+    .add(params, 'upscaleMode', {
+      FSR1: 'fsr1',
+      Lanczos: 'lanczos',
+      Bicubic: 'bicubic',
+    })
+    .name('上采样')
+    .onChange(() => {
+      refreshGuiLayout();
+    });
+  const fsrSharpnessCtrl = resolutionFolder
+    .add(params, 'fsrSharpness', 0, 2, 0.05)
+    .name('FSR 锐化')
+    .onChange(() => {
+      setF(gl, passes.fsrRcas.program, passes.fsrRcas.uniforms, 'sharpnessStops', params.fsrSharpness);
+    });
+  resolutionFolder
+    .add(renderState, 'internalResolution')
+    .name('内部尺寸')
+    .listen();
+  resolutionFolder
+    .add(renderState, 'displayResolution')
+    .name('画布尺寸')
+    .listen();
 
   const antiAliasFolder = renderFolder.addFolder('抗锯齿');
   const antialiasCtrl = antiAliasFolder
@@ -1775,6 +1933,10 @@ async function main(): Promise<void> {
     setGuiVisible(timeWarpDistanceScaleCtrl, enabled);
   }
 
+  function refreshResolutionControls(): void {
+    setGuiVisible(fsrSharpnessCtrl, params.upscaleMode === 'fsr1');
+  }
+
   function refreshAccretionDiskControls(): void {
     const enabled = params.adiskEnabled;
     setGuiVisible(adiskParticleCtrl, enabled);
@@ -1813,6 +1975,8 @@ async function main(): Promise<void> {
   function refreshGuiLayout(): void {
     uiView.cameraMode = getActiveCameraMode();
     syncCanvasCursor();
+    syncRenderSummary();
+    refreshResolutionControls();
     updateAAUIControls(params.antialias);
     refreshDynamicsControls();
     refreshTimeWarpControls();
@@ -1831,6 +1995,7 @@ async function main(): Promise<void> {
   sceneFolder.close();
   interactionFolder.close();
   renderFolder.close();
+  resolutionFolder.close();
   recordingFolder.close();
   timeWarpFolder.close();
   diskFolder.close();
@@ -1900,6 +2065,7 @@ async function main(): Promise<void> {
 
       const playbackFrame = recordingManager.getPlaybackFrame();
       if (playbackFrame) {
+        const previousRenderScale = params.renderScale;
         Object.assign(params, {
           cameraZoom: playbackFrame.render.cameraZoom,
           cameraRoll: playbackFrame.camera.roll,
@@ -1913,6 +2079,9 @@ async function main(): Promise<void> {
         applySceneState(scene, playbackFrame.scene);
         syncUiSceneFromScene(uiScene, scene);
         Object.assign(params, playbackFrame.render);
+        if (Math.abs(params.renderScale - previousRenderScale) > 1e-6) {
+          scheduleResizeNow('playback-render-scale');
+        }
         refreshGuiLayout();
         gui.controllersRecursive().forEach((c) => c.updateDisplay());
       } else {
@@ -1966,16 +2135,18 @@ async function main(): Promise<void> {
         }
       }
 
-      const { width: rw, height: rh, main, mainMsaa, mainResolved, brightness, down, up, bloomFinal, taaBuffers, tonemapped, output } =
+      const { width: rw, height: rh, main, mainMsaa, mainResolved, brightness, down, up, bloomFinal, taaBuffers, tonemapped, output, fsrEasu } =
         pipeline;
       const n = params.bloomIterations;
       const aaMode = activeAntialiasMode;
+      const renderMouseX = canvas.width > 0 ? mouseX * (rw / canvas.width) : 0;
+      const renderMouseY = canvas.height > 0 ? mouseY * (rh / canvas.height) : 0;
 
       const sceneTargetFbo = mainMsaa ? mainMsaa.fbo : main.fbo;
       drawPass(gl, vao, passes.blackhole, sceneTargetFbo, rw, rh, time, () => {
         const p = passes.blackhole;
-        setF(gl, p.program, p.uniforms, 'mouseX', mouseX);
-        setF(gl, p.program, p.uniforms, 'mouseY', mouseY);
+        setF(gl, p.program, p.uniforms, 'mouseX', renderMouseX);
+        setF(gl, p.program, p.uniforms, 'mouseY', renderMouseY);
         setI1(gl, p.program, p.uniforms, 'colorMap', 0);
         setI1(gl, p.program, p.uniforms, 'galaxy', 1);
         gl.activeTexture(gl.TEXTURE0);
@@ -2144,11 +2315,34 @@ async function main(): Promise<void> {
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, canvas.width, canvas.height);
-    drawPass(gl, vao, passes.passthrough, null, canvas.width, canvas.height, time, () => {
-      setI1(gl, passes.passthrough.program, passes.passthrough.uniforms, 'texture0', 0);
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, output.texture);
-    });
+    const canUseFsr1 = params.upscaleMode === 'fsr1' && rw <= canvas.width && rh <= canvas.height;
+    if (canUseFsr1) {
+      drawPass(gl, vao, passes.fsrEasu, fsrEasu.fbo, canvas.width, canvas.height, time, () => {
+        setI1(gl, passes.fsrEasu.program, passes.fsrEasu.uniforms, 'texture0', 0);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, output.texture);
+      });
+
+      drawPass(gl, vao, passes.fsrRcas, null, canvas.width, canvas.height, time, () => {
+        setI1(gl, passes.fsrRcas.program, passes.fsrRcas.uniforms, 'texture0', 0);
+        setF(gl, passes.fsrRcas.program, passes.fsrRcas.uniforms, 'sharpnessStops', params.fsrSharpness);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, fsrEasu.texture);
+      });
+    } else {
+      drawPass(gl, vao, passes.upscale, null, canvas.width, canvas.height, time, () => {
+        setI1(gl, passes.upscale.program, passes.upscale.uniforms, 'texture0', 0);
+        setI1(
+          gl,
+          passes.upscale.program,
+          passes.upscale.uniforms,
+          'upscaleMode',
+          params.upscaleMode === 'bicubic' ? 0 : 1,
+        );
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, output.texture);
+      });
+    }
 
     drawTrails(time, playbackFrame?.camera.position);
     firstFrame = false;

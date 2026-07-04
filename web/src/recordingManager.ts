@@ -4,6 +4,7 @@ type JsonObject = Record<string, unknown>;
 
 const BODY_KINDS = ['blackHole', 'whiteHole', 'neutronStar'] as const;
 const DYNAMICS_MODES = ['static', 'kepler', 'nbody'] as const;
+const UPSCALE_MODES = ['bicubic', 'lanczos', 'fsr1'] as const;
 const RENDER_BOOLEAN_FIELDS = [
   'gravatationalLensing',
   'renderBlackHole',
@@ -16,6 +17,8 @@ const RENDER_BOOLEAN_FIELDS = [
 ] as const;
 const RENDER_NUMBER_FIELDS = [
   'cameraZoom',
+  'renderScale',
+  'fsrSharpness',
   'adiskDensityV',
   'adiskDensityH',
   'adiskHeight',
@@ -34,6 +37,9 @@ const RENDER_NUMBER_FIELDS = [
 
 const RENDER_STATE_DEFAULTS = {
   cameraZoom: 1,
+  renderScale: 1,
+  upscaleMode: 'fsr1',
+  fsrSharpness: 0.2,
   dopplerEnabled: false,
   dopplerStrength: 1.0,
   dopplerBeta: 0.35,
@@ -88,6 +94,10 @@ function isBodyKind(value: unknown): value is SceneState['bodies'][number]['kind
 
 function isDynamicsMode(value: unknown): value is SceneState['dynamics'] {
   return typeof value === 'string' && DYNAMICS_MODES.includes(value as (typeof DYNAMICS_MODES)[number]);
+}
+
+function isUpscaleMode(value: unknown): value is RecordingFrame['render']['upscaleMode'] {
+  return typeof value === 'string' && UPSCALE_MODES.includes(value as (typeof UPSCALE_MODES)[number]);
 }
 
 function isBodyVisual(value: unknown): value is SceneState['bodies'][number]['visual'] {
@@ -152,6 +162,9 @@ function isRenderState(value: unknown): value is RecordingFrame['render'] {
     isNumberInRange(value.adiskDensityH, 0, 10) &&
     isNumberInRange(value.adiskHeight, 0, 1) &&
     isNumberInRange(value.cameraZoom, 0.15, 2.4) &&
+    isNumberInRange(value.renderScale, 0.35, 1.5) &&
+    isNumberInRange(value.fsrSharpness, 0, 2) &&
+    isUpscaleMode(value.upscaleMode) &&
     isNumberInRange(value.adiskLit, 0, 4) &&
     isIntegerInRange(value.adiskNoiseLOD, 1, 12) &&
     isNumberInRange(value.adiskNoiseScale, 0, 10) &&
@@ -232,11 +245,13 @@ function parseRecordingFrames(data: unknown): RecordingFrame[] | null {
   }
   const framesWithDefaults = data.frames.map((frame) => {
     if (!isObject(frame) || !isObject(frame.render)) return frame;
+    const normalizedUpscaleMode = frame.render.upscaleMode === 'fsrLike' ? 'fsr1' : frame.render.upscaleMode;
     return {
       ...frame,
       render: {
         ...RENDER_STATE_DEFAULTS,
         ...frame.render,
+        upscaleMode: normalizedUpscaleMode,
       },
     };
   });
@@ -267,6 +282,9 @@ function parseRecordingFrames(data: unknown): RecordingFrame[] | null {
       gravatationalLensing: frame.render.gravatationalLensing,
       renderBlackHole: frame.render.renderBlackHole,
       cameraZoom: frame.render.cameraZoom,
+      renderScale: frame.render.renderScale,
+      fsrSharpness: frame.render.fsrSharpness,
+      upscaleMode: frame.render.upscaleMode,
       adiskEnabled: frame.render.adiskEnabled,
       adiskParticle: frame.render.adiskParticle,
       adiskDensityV: frame.render.adiskDensityV,
@@ -317,6 +335,9 @@ export interface RecordingFrame {
     gravatationalLensing: boolean;
     renderBlackHole: boolean;
     cameraZoom: number;
+    renderScale: number;
+    fsrSharpness: number;
+    upscaleMode: 'bicubic' | 'lanczos' | 'fsr1';
     adiskEnabled: boolean;
     adiskParticle: boolean;
     adiskDensityV: number;
@@ -393,6 +414,9 @@ export class RecordingManager {
       gravatationalLensing: boolean;
       renderBlackHole: boolean;
       cameraZoom: number;
+      renderScale: number;
+      fsrSharpness: number;
+      upscaleMode: 'bicubic' | 'lanczos' | 'fsr1';
       adiskEnabled: boolean;
       adiskParticle: boolean;
       adiskDensityV: number;
@@ -444,6 +468,9 @@ export class RecordingManager {
         gravatationalLensing: params.gravatationalLensing,
         renderBlackHole: params.renderBlackHole,
         cameraZoom: params.cameraZoom,
+        renderScale: params.renderScale,
+        fsrSharpness: params.fsrSharpness,
+        upscaleMode: params.upscaleMode,
         adiskEnabled: params.adiskEnabled,
         adiskParticle: params.adiskParticle,
         adiskDensityV: params.adiskDensityV,
