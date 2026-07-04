@@ -1957,7 +1957,7 @@ async function main(): Promise<void> {
       }
       refreshRecordingControls();
 
-      ambientAudio.update(scene);
+      ambientAudio.update(scene, cam.cameraPos);
 
       if (scene.showTrails) {
         for (let bi = 0; bi < scene.bodyCount; bi++) {
