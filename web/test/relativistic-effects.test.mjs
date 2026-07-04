@@ -25,19 +25,23 @@ test('relativistic Doppler uses camera-to-sample sightline, not radial disk dire
   assert.match(mainTs, /['"]cameraWorld['"]/);
 });
 
-test('explicit front and top view controls take precedence over mouse camera control', () => {
-  assert.match(cameraTs, /else\s+if\s*\(frontView\)\s*{\s*cameraPos\s*=\s*\[10,\s*1,\s*10\]/);
-  assert.match(cameraTs, /else\s+if\s*\(topView\)\s*{\s*cameraPos\s*=\s*\[15,\s*15,\s*0\]/);
+test('explicit front and top view controls take precedence over orbit camera input', () => {
   assert.match(
     cameraTs,
-    /cameraPosOverride[\s\S]*?frontView[\s\S]*?topView[\s\S]*?mouseControl/,
+    /else\s+if\s*\(frontView\)\s*{\s*cameraPos\s*=\s*addVec3\(target,\s*scaleDirection\(normalizeVec3\(10,\s*1,\s*10\),\s*distance\)\)/,
   );
   assert.match(
-    shader,
-    /playbackCamera[\s\S]*?frontView[\s\S]*?topView[\s\S]*?mouseControl/,
+    cameraTs,
+    /else\s+if\s*\(topView\)\s*{\s*cameraPos\s*=\s*addVec3\(target,\s*scaleDirection\(normalizeVec3\(15,\s*15,\s*0\),\s*distance\)\)/,
   );
-  assert.match(mainTs, /frontViewCtrl\.onChange/);
-  assert.match(mainTs, /topViewCtrl\.onChange/);
+  assert.match(cameraTs, /cameraPosOverride[\s\S]*?frontView[\s\S]*?topView[\s\S]*?mouseControl/);
+  assert.match(shader, /uniform\s+vec3\s+cameraRight\s*;/);
+  assert.match(shader, /uniform\s+vec3\s+cameraUp\s*;/);
+  assert.match(shader, /uniform\s+vec3\s+cameraForward\s*;/);
+  assert.match(mainTs, /['"]cameraRight['"]/);
+  assert.match(mainTs, /['"]cameraUp['"]/);
+  assert.match(mainTs, /['"]cameraForward['"]/);
+  assert.match(mainTs, /add\(uiView,\s*['"]cameraMode['"]/);
 });
 
 test('recording render state preserves relativistic visual parameters', () => {
@@ -46,13 +50,18 @@ test('recording render state preserves relativistic visual parameters', () => {
     assert.match(recordingManagerTs, new RegExp(`${field}:\\s*params\\.${field}`));
     assert.match(recordingManagerTs, new RegExp(`${field}:\\s*frame\\.render\\.${field}`));
   }
+  assert.match(recordingManagerTs, /cameraDistance:\s*params\.cameraDistance/);
+  assert.match(recordingManagerTs, /cameraFovDeg:\s*params\.cameraFovDeg/);
+  assert.match(recordingManagerTs, /cameraDistance:\s*frame\.render\.cameraDistance/);
+  assert.match(recordingManagerTs, /cameraFovDeg:\s*frame\.render\.cameraFovDeg/);
+  assert.match(recordingManagerTs, /legacyZoomToFovDeg/);
 });
 
 test('gesture init failure rolls GUI state back to off', () => {
-  assert.match(mainTs, /const\s+gestureModeCtrl\s*=\s*gui\.add\(params,\s*['"]gestureMode['"]/);
-  assert.match(mainTs, /if\s*\(!success\)\s*{[\s\S]*?params\.gestureMode\s*=\s*['"]off['"][\s\S]*?gestureModeCtrl\.updateDisplay\(\)/);
-  assert.match(mainTs, /showGestureStatusMessage\(\s*['"]手势: 初始化失败，已恢复为关闭['"],\s*true\s*\)/);
-  assert.match(mainTs, /params\.mouseControl\s*=\s*true[\s\S]*?updateViewControlDisplay\(\)/);
+  assert.match(mainTs, /const\s+gestureModeCtrl\s*=\s*interactionFolder\s*[\s\S]*?\.add\(params,\s*['"]gestureMode['"]/);
+  assert.match(mainTs, /if\s*\(!success\)\s*{[\s\S]*?params\.gestureMode\s*=\s*['"]off['"][\s\S]*?refreshGuiDisplays\(\)/);
+  assert.match(mainTs, /if\s*\(!success\)\s*{[\s\S]*?showGestureStatusMessage\([\s\S]*?,\s*true\s*\)/);
+  assert.match(mainTs, /function\s+updateViewControlDisplays\(\)/);
 });
 
 test('local gesture teardown stops camera tracks', () => {

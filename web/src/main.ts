@@ -12,7 +12,7 @@ import {
   resolveMSAA,
   type MSAART,
 } from './gl.js';
-import { loadCubemap, loadTexture2D } from './resources.js';
+import { listSkyboxSources, loadSkyboxAsset, loadTexture2D } from './resources.js';
 import {
   HandGestureController,
 } from './handGesture.js';
@@ -23,6 +23,7 @@ import {
   type SceneState,
   applySceneState,
   cloneSceneState,
+  normalizeSceneForNBody,
 } from './scene.js';
 import { stepScene, calculateTimeWarp } from './physics.js';
 import { createDefaultScene, SCENE_PRESETS } from './scenePresets.js';
@@ -72,17 +73,25 @@ import taaBlendFrag from '../shader/taa_blend.frag?raw';
 const MAX_BLOOM_ITER = 8;
 const MAX_DPR = 2;
 const LENS_MASS_REF = 10;
-const DEFAULT_CAMERA_ZOOM = 1;
-const MIN_CAMERA_ZOOM = 0.15;
-const MAX_CAMERA_ZOOM = 2.4;
-const ZOOM_WHEEL_SENSITIVITY = 0.0015;
+const DEFAULT_CAMERA_DISTANCE = 15;
+const MIN_CAMERA_DISTANCE = 0.2;
+const MAX_CAMERA_DISTANCE = 50;
+const DEFAULT_CAMERA_FOV_DEG = 100;
+const MIN_CAMERA_FOV_DEG = 15;
+const MAX_CAMERA_FOV_DEG = 140;
+const DISTANCE_WHEEL_SENSITIVITY = 0.0015;
+const ORBIT_YAW_RANGE = Math.PI * 2.0;
+const ORBIT_PITCH_RANGE = Math.PI * 0.75;
+const ORBIT_PITCH_MIN = -ORBIT_PITCH_RANGE * 0.5;
+const ORBIT_PITCH_MAX = ORBIT_PITCH_RANGE * 0.5;
 const MIN_RENDER_SCALE = 0.35;
 const MAX_RENDER_SCALE = 1.5;
+const DEFAULT_FRAME_RATE_LIMIT = 60;
+const MAX_FRAME_RATE_LIMIT = 240;
 
 type AntialiasMode = 'off' | 'fxaa' | 'taa';
 type GestureMode = 'off' | 'local' | 'server';
 type UpscaleMode = 'bicubic' | 'lanczos' | 'fsr1';
-
 interface PipelineAllocResult {
   pipeline: PipelineRTs;
   format: ColorRTFormat;
@@ -113,7 +122,8 @@ interface Params {
   renderBlackHole: boolean;
   mouseControl: boolean;
   gestureMode: 'off' | 'local' | 'server';
-  cameraZoom: number;
+  cameraDistance: number;
+  cameraFovDeg: number;
   cameraRoll: number;
   frontView: boolean;
   topView: boolean;
@@ -141,6 +151,8 @@ interface Params {
   renderScale: number;
   upscaleMode: UpscaleMode;
   fsrSharpness: number;
+  frameRateLimit: number;
+  skyboxPreset: string;
 }
 
 const params: Params = {
@@ -152,7 +164,8 @@ const params: Params = {
   renderBlackHole: true,
   mouseControl: true,
   gestureMode: 'off',
-  cameraZoom: DEFAULT_CAMERA_ZOOM,
+  cameraDistance: DEFAULT_CAMERA_DISTANCE,
+  cameraFovDeg: DEFAULT_CAMERA_FOV_DEG,
   cameraRoll: 0,
   frontView: false,
   topView: false,
@@ -165,10 +178,10 @@ const params: Params = {
   adiskNoiseLOD: 5,
   adiskNoiseScale: 0.8,
   adiskSpeed: 0.5,
-  dopplerEnabled: false,
+  dopplerEnabled: true,
   dopplerStrength: 1.0,
   dopplerBeta: 0.35,
-  beamingEnabled: false,
+  beamingEnabled: true,
   beamingPower: 3.5,
   spinEnabled: false,
   spinA: 0.7,
@@ -176,9 +189,11 @@ const params: Params = {
   bloomStrength: 0.1,
   tonemappingEnabled: true,
   gamma: 2.5,
-  renderScale: 1,
+  renderScale: 0.6,
   upscaleMode: 'fsr1',
   fsrSharpness: 0.2,
+  frameRateLimit: DEFAULT_FRAME_RATE_LIMIT,
+  skyboxPreset: 'skybox_nebula_dark',
 };
 
 interface PipelineRTs {
@@ -558,6 +573,16 @@ function wrapUnitInterval(value: number): number {
   return wrapped < 0 ? wrapped + 1 : wrapped;
 }
 
+function formatSkyboxLabel(id: string, kind: 'cubemap' | 'panorama'): string {
+  const words = id
+    .replace(/^skybox_/, '')
+    .split('_')
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1));
+  const name = words.length > 0 ? words.join(' ') : id;
+  return `${name} (${kind === 'cubemap' ? 'Cubemap' : 'Panorama'})`;
+}
+
 function deriveNBodyGFromCentralMu(gmCentral: number, centralMass: number): number {
   return clampNumber(gmCentral / Math.max(centralMass, 1e-6), 0.1, 20);
 }
@@ -566,29 +591,14 @@ function deriveCentralMuFromNBodyG(nbodyG: number, centralMass: number): number 
   return clampNumber(nbodyG * Math.max(centralMass, 1e-6), 1, 500);
 }
 
-function rebalanceCentralMomentum(scene: SceneState): void {
-  if (scene.bodyCount < 2) return;
-  const centralMass = Math.max(scene.bodies[0]!.mass, 1e-6);
-  let px = 0;
-  let py = 0;
-  let pz = 0;
-  for (let i = 1; i < scene.bodyCount; i++) {
-    const body = scene.bodies[i]!;
-    px += body.mass * body.velocity[0];
-    py += body.mass * body.velocity[1];
-    pz += body.mass * body.velocity[2];
-  }
-  scene.bodies[0]!.velocity[0] = -px / centralMass;
-  scene.bodies[0]!.velocity[1] = -py / centralMass;
-  scene.bodies[0]!.velocity[2] = -pz / centralMass;
-}
-
 function adaptSceneForDynamicsSwitch(scene: SceneState, previous: SceneState['dynamics'], next: SceneState['dynamics']): void {
   if (previous === next) return;
 
-  if (previous === 'kepler' && next === 'nbody') {
-    scene.nbodyG = deriveNBodyGFromCentralMu(scene.gmCentral, scene.bodies[0]!.mass);
-    rebalanceCentralMomentum(scene);
+  if (next === 'nbody') {
+    if (previous === 'kepler') {
+      scene.nbodyG = deriveNBodyGFromCentralMu(scene.gmCentral, scene.bodies[0]!.mass);
+    }
+    normalizeSceneForNBody(scene);
     return;
   }
 
@@ -789,6 +799,7 @@ async function main(): Promise<void> {
   const canvas = document.getElementById('c') as HTMLCanvasElement;
   const trailCanvas = document.getElementById('trail') as HTMLCanvasElement | null;
   const trailCtx = trailCanvas?.getContext('2d');
+  const fpsOverlay = document.getElementById('fps') as HTMLDivElement | null;
   const glCtx = canvas.getContext('webgl2', {
     antialias: false,
     depth: false,
@@ -808,8 +819,21 @@ async function main(): Promise<void> {
   const trails = new TrailBuffer();
   const assetPath = (path: string): string => `${import.meta.env.BASE_URL}${path}`;
 
-  const [galaxy, colorMap, vao, passes] = await Promise.all([
-    loadCubemap(gl, assetPath('assets/skybox_nebula_dark')),
+  const skyboxSources = listSkyboxSources();
+  if (skyboxSources.length === 0) {
+    throw new Error('No skybox sources found under public/assets/skybox_*');
+  }
+  if (!skyboxSources.some((source) => source.id === params.skyboxPreset)) {
+    params.skyboxPreset = skyboxSources[0]!.id;
+  }
+  const skyboxOptions = Object.fromEntries(
+    skyboxSources.map((source) => [formatSkyboxLabel(source.id, source.kind), source.id] as const),
+  );
+
+  const [skyboxAssets, colorMap, vao, passes] = await Promise.all([
+    Promise.all(
+      skyboxSources.map(async (source) => [source.id, await loadSkyboxAsset(gl, source)] as const),
+    ).then((entries) => Object.fromEntries(entries) as Record<string, Awaited<ReturnType<typeof loadSkyboxAsset>>>),
     loadTexture2D(gl, assetPath('assets/color_map.png')),
     Promise.resolve(createQuadVAO(gl)),
     Promise.resolve({
@@ -828,6 +852,7 @@ async function main(): Promise<void> {
   ]);
 
   setI1(gl, passes.upscale.program, passes.upscale.uniforms, 'texture0', 0);
+  setI1(gl, passes.blackhole.program, passes.blackhole.uniforms, 'galaxyPanorama', 2);
   setI1(gl, passes.fsrEasu.program, passes.fsrEasu.uniforms, 'texture0', 0);
   setI1(gl, passes.fsrRcas.program, passes.fsrRcas.uniforms, 'texture0', 0);
   setF(gl, passes.fsrRcas.program, passes.fsrRcas.uniforms, 'sharpnessStops', params.fsrSharpness);
@@ -835,60 +860,136 @@ async function main(): Promise<void> {
   setI1(gl, passes.fxaa.program, passes.fxaa.uniforms, 'fxaaQuality', params.fxaaQuality);
   setF(gl, passes.taaBlend.program, passes.taaBlend.uniforms, 'taaFeedback', params.taaFeedback);
   setF(gl, passes.taaBlend.program, passes.taaBlend.uniforms, 'firstFrame', 1.0);
+  let skybox = skyboxAssets[params.skyboxPreset]!;
 
   let mouseX = 0;
   let mouseY = 0;
   let orbitPointerX = 0.5;
   let orbitPointerY = 0.5;
-  let isOrbitDragging = false;
+  let orbitYaw = 0;
+  let orbitPitch = 0;
+  let cameraTarget: [number, number, number] = [0, 0, 0];
+  let activeDragMode: 'orbit' | 'pan' | null = null;
   let activePointerId: number | null = null;
   let lastPointerClientX = 0;
   let lastPointerClientY = 0;
   let cameraModeCtrl: { updateDisplay(): void } | null = null;
-  let cameraZoomCtrl: { updateDisplay(): void } | null = null;
+  let cameraDistanceCtrl: { updateDisplay(): void } | null = null;
+  let cameraFovCtrl: { updateDisplay(): void } | null = null;
   let cameraRollCtrl: { updateDisplay(): void } | null = null;
+  let fpsFrameCounter = 0;
+  let fpsAccumulatedSeconds = 0;
+  let fpsLastFrameTime = performance.now();
+  let frameLimiterDeadlineMs = 0;
+  let appliedFrameRateLimit = params.frameRateLimit;
 
   canvas.style.touchAction = 'none';
 
-  function applyOrbitPointerToMouse(): void {
+  function syncSkyboxTexture(): void {
+    if (!(params.skyboxPreset in skyboxAssets)) {
+      params.skyboxPreset = skyboxSources[0]!.id;
+    }
+    skybox = skyboxAssets[params.skyboxPreset]!;
+  }
+
+  function syncMouseFromOrbitState(): void {
+    orbitPointerX = wrapUnitInterval(orbitYaw / ORBIT_YAW_RANGE + 0.5);
+    orbitPointerY = clampNumber(0.5 - orbitPitch / ORBIT_PITCH_RANGE, 0, 1);
     mouseX = orbitPointerX * Math.max(canvas.width, 1);
     mouseY = orbitPointerY * Math.max(canvas.height, 1);
   }
 
-  function captureOrbitPointerFromMouse(): void {
-    orbitPointerX = wrapUnitInterval(mouseX / Math.max(canvas.width, 1));
-    orbitPointerY = clampNumber(mouseY / Math.max(canvas.height, 1), 0, 1);
+  function captureOrbitStateFromMouse(): void {
+    const width = Math.max(canvas.width, 1);
+    const height = Math.max(canvas.height, 1);
+    const normalizedX = mouseX / width;
+    const normalizedY = mouseY / height;
+    orbitYaw = (normalizedX - 0.5) * ORBIT_YAW_RANGE;
+    orbitPitch = clampNumber((0.5 - normalizedY) * ORBIT_PITCH_RANGE, ORBIT_PITCH_MIN, ORBIT_PITCH_MAX);
+    syncMouseFromOrbitState();
   }
 
   function setOrbitPointer(normalizedX: number, normalizedY: number): void {
-    orbitPointerX = wrapUnitInterval(normalizedX);
-    orbitPointerY = clampNumber(normalizedY, 0, 1);
-    applyOrbitPointerToMouse();
+    orbitYaw = (normalizedX - 0.5) * ORBIT_YAW_RANGE;
+    orbitPitch = clampNumber((0.5 - normalizedY) * ORBIT_PITCH_RANGE, ORBIT_PITCH_MIN, ORBIT_PITCH_MAX);
+    syncMouseFromOrbitState();
+  }
+
+  function nudgeOrbit(deltaX: number, deltaY: number): void {
+    orbitYaw += deltaX * ORBIT_YAW_RANGE;
+    orbitPitch = clampNumber(orbitPitch + deltaY * ORBIT_PITCH_RANGE, ORBIT_PITCH_MIN, ORBIT_PITCH_MAX);
+    syncMouseFromOrbitState();
+  }
+
+  function getPanScale(rectWidth: number, rectHeight: number): { x: number; y: number } {
+    const safeWidth = Math.max(rectWidth, 1);
+    const safeHeight = Math.max(rectHeight, 1);
+    const fovScale = getViewFovScale();
+    const verticalWorldSpan = Math.max(params.cameraDistance, MIN_CAMERA_DISTANCE) * fovScale;
+    const horizontalWorldSpan = verticalWorldSpan * (safeWidth / safeHeight);
+    return {
+      x: horizontalWorldSpan,
+      y: verticalWorldSpan,
+    };
+  }
+
+  function nudgePan(deltaX: number, deltaY: number): void {
+    const cam = getCameraLookBasis(
+      0,
+      orbitYaw,
+      orbitPitch,
+      params.cameraDistance,
+      cameraTarget,
+      params.mouseControl,
+      params.frontView,
+      params.topView,
+      params.cameraRoll,
+    );
+    const rect = canvas.getBoundingClientRect();
+    const panScale = getPanScale(rect.width, rect.height);
+    const moveRight = deltaX * panScale.x;
+    const moveUp = deltaY * panScale.y;
+    cameraTarget = [
+      cameraTarget[0] + cam.uu[0] * moveRight + cam.vv[0] * moveUp,
+      cameraTarget[1] + cam.uu[1] * moveRight + cam.vv[1] * moveUp,
+      cameraTarget[2] + cam.uu[2] * moveRight + cam.vv[2] * moveUp,
+    ];
   }
 
   function updateViewControlDisplays(): void {
     cameraModeCtrl?.updateDisplay();
-    cameraZoomCtrl?.updateDisplay();
+    cameraDistanceCtrl?.updateDisplay();
+    cameraFovCtrl?.updateDisplay();
     cameraRollCtrl?.updateDisplay();
   }
 
   function syncCanvasCursor(): void {
-    canvas.style.cursor = params.mouseControl ? (isOrbitDragging ? 'grabbing' : 'grab') : 'default';
+    if (activeDragMode === 'pan') {
+      canvas.style.cursor = 'move';
+      return;
+    }
+    if (!params.mouseControl) {
+      canvas.style.cursor = 'default';
+      return;
+    }
+    canvas.style.cursor = activeDragMode === 'orbit' ? 'grabbing' : 'grab';
   }
 
-  function finishOrbitDrag(pointerId?: number): void {
+  function finishPointerDrag(pointerId?: number): void {
     if (pointerId !== undefined && activePointerId !== pointerId) return;
     if (activePointerId !== null && canvas.hasPointerCapture(activePointerId)) {
       canvas.releasePointerCapture(activePointerId);
     }
-    isOrbitDragging = false;
+    activeDragMode = null;
     activePointerId = null;
     syncCanvasCursor();
   }
 
   function resetOrbitView(): void {
     setOrbitPointer(0.5, 0.5);
-    params.cameraZoom = DEFAULT_CAMERA_ZOOM;
+    cameraTarget = [0, 0, 0];
+    params.cameraDistance = DEFAULT_CAMERA_DISTANCE;
+    params.cameraFovDeg = DEFAULT_CAMERA_FOV_DEG;
     params.cameraRoll = 0;
     applyCameraMode('orbit');
   }
@@ -897,8 +998,10 @@ async function main(): Promise<void> {
   syncCanvasCursor();
 
   canvas.addEventListener('pointerdown', (event) => {
-    if (!params.mouseControl || event.button !== 0) return;
-    isOrbitDragging = true;
+    const wantsOrbit = event.button === 0 && params.mouseControl;
+    const wantsPan = event.button === 2;
+    if (!wantsOrbit && !wantsPan) return;
+    activeDragMode = wantsPan ? 'pan' : 'orbit';
     activePointerId = event.pointerId;
     lastPointerClientX = event.clientX;
     lastPointerClientY = event.clientY;
@@ -908,35 +1011,42 @@ async function main(): Promise<void> {
   });
 
   canvas.addEventListener('pointermove', (event) => {
-    if (!params.mouseControl || !isOrbitDragging || activePointerId !== event.pointerId) return;
+    if (!activeDragMode || activePointerId !== event.pointerId) return;
     const rect = canvas.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return;
     const deltaX = (event.clientX - lastPointerClientX) / rect.width;
     const deltaY = (event.clientY - lastPointerClientY) / rect.height;
     lastPointerClientX = event.clientX;
     lastPointerClientY = event.clientY;
-    setOrbitPointer(orbitPointerX + deltaX, orbitPointerY + deltaY);
+    if (activeDragMode === 'orbit') {
+      nudgeOrbit(deltaX, deltaY);
+    } else {
+      nudgePan(deltaX, deltaY);
+    }
   });
 
   canvas.addEventListener('pointerup', (event) => {
-    finishOrbitDrag(event.pointerId);
+    finishPointerDrag(event.pointerId);
   });
   canvas.addEventListener('pointercancel', (event) => {
-    finishOrbitDrag(event.pointerId);
+    finishPointerDrag(event.pointerId);
   });
   canvas.addEventListener('lostpointercapture', () => {
-    finishOrbitDrag();
+    finishPointerDrag();
+  });
+  canvas.addEventListener('contextmenu', (event) => {
+    event.preventDefault();
   });
   canvas.addEventListener(
     'wheel',
     (event) => {
       if (!params.mouseControl && !params.frontView && !params.topView) return;
-      params.cameraZoom = clampNumber(
-        params.cameraZoom * Math.exp(-event.deltaY * ZOOM_WHEEL_SENSITIVITY),
-        MIN_CAMERA_ZOOM,
-        MAX_CAMERA_ZOOM,
+      params.cameraDistance = clampNumber(
+        params.cameraDistance * Math.exp(event.deltaY * DISTANCE_WHEEL_SENSITIVITY),
+        MIN_CAMERA_DISTANCE,
+        MAX_CAMERA_DISTANCE,
       );
-      cameraZoomCtrl?.updateDisplay();
+      cameraDistanceCtrl?.updateDisplay();
       event.preventDefault();
     },
     { passive: false },
@@ -1235,7 +1345,7 @@ async function main(): Promise<void> {
     }
     canvas.width = w;
     canvas.height = h;
-    applyOrbitPointerToMouse();
+    syncMouseFromOrbitState();
     destroyPipeline(gl, pipeline);
     const r = tryAllocPipeline(gl, renderW, renderH, w, h, params.antialias, params.msaaSamples);
     pipeline = r.pipeline;
@@ -1308,7 +1418,7 @@ async function main(): Promise<void> {
     playbackProgress: 0,
   };
   const audioState = {
-    enabled: false,
+    enabled: true,
     volume: 0.5,
   };
   const renderState = {
@@ -1324,11 +1434,12 @@ async function main(): Promise<void> {
   }
 
   function getViewFovScale(): number {
-    return 1 / params.cameraZoom;
+    const fovRadians = (clampNumber(params.cameraFovDeg, MIN_CAMERA_FOV_DEG, MAX_CAMERA_FOV_DEG) * Math.PI) / 180;
+    return 2 * Math.tan(fovRadians * 0.5);
   }
 
   function applyCameraMode(mode: CameraMode): void {
-    if (mode !== 'orbit') finishOrbitDrag();
+    if (mode !== 'orbit') finishPointerDrag();
     params.mouseControl = mode === 'orbit';
     params.frontView = mode === 'front';
     params.topView = mode === 'top';
@@ -1343,11 +1454,52 @@ async function main(): Promise<void> {
     recordingState.playbackProgress = status.playbackProgress;
   }
 
+  function computeTraceMaxDistance(cameraPos: [number, number, number]): number {
+    let farthestDistance = params.cameraDistance + 20;
+    for (let i = 0; i < scene.bodyCount; i++) {
+      const body = scene.bodies[i]!;
+      const dx = body.position[0] - cameraPos[0];
+      const dy = body.position[1] - cameraPos[1];
+      const dz = body.position[2] - cameraPos[2];
+      const bodyDistance = Math.hypot(dx, dy, dz);
+      const margin = 12 + body.visual.size * 12;
+      farthestDistance = Math.max(farthestDistance, bodyDistance + margin);
+    }
+    return clampNumber(farthestDistance, 40, 200);
+  }
+
   function syncRenderSummary(): void {
     const { width: displayWidth, height: displayHeight } = getDisplaySize();
     const { width: renderWidth, height: renderHeight } = getRenderTargetSize(displayWidth, displayHeight);
     renderState.displayResolution = `${displayWidth} × ${displayHeight}`;
     renderState.internalResolution = `${renderWidth} × ${renderHeight}`;
+  }
+
+  async function setAmbientAudioPreference(enabled: boolean): Promise<void> {
+    audioState.enabled = enabled;
+    ambientAudio.setVolume(audioState.volume);
+    if (!enabled) {
+      await ambientAudio.toggle(false);
+      refreshGuiDisplays();
+      return;
+    }
+    try {
+      await ambientAudio.toggle(true);
+    } catch (error) {
+      console.warn('[blackhole-web] Ambient audio enable deferred until the next user interaction.', error);
+    }
+    refreshGuiDisplays();
+  }
+
+  async function ensureAmbientAudioActive(): Promise<void> {
+    if (!audioState.enabled || ambientAudio.isEnabled()) return;
+    ambientAudio.setVolume(audioState.volume);
+    try {
+      await ambientAudio.toggle(true);
+      refreshGuiDisplays();
+    } catch {
+      // Browser autoplay policies can delay audio resume until a later interaction.
+    }
   }
 
   function refreshGuiDisplays(): void {
@@ -1358,7 +1510,11 @@ async function main(): Promise<void> {
   function loadPreset(name: keyof typeof SCENE_PRESETS): void {
     const snap = SCENE_PRESETS[name];
     if (!snap) return;
-    applySceneState(scene, cloneSceneState(snap));
+    const nextScene = cloneSceneState(snap);
+    if (nextScene.dynamics === 'nbody') {
+      normalizeSceneForNBody(nextScene);
+    }
+    applySceneState(scene, nextScene);
     initialSnapshot = cloneSceneState(scene);
     syncUiSceneFromScene(uiScene, scene);
     refreshGuiDisplays();
@@ -1375,6 +1531,17 @@ async function main(): Promise<void> {
   uiView.cameraMode = getActiveCameraMode();
 
   const commonFolder = gui.addFolder('常用操作');
+  window.addEventListener(
+    'pointerdown',
+    () => {
+      void ensureAmbientAudioActive();
+    },
+    { passive: true },
+  );
+  window.addEventListener('keydown', () => {
+    void ensureAmbientAudioActive();
+  });
+
   addGuiClass(commonFolder, 'blackhole-gui-primary-folder');
   commonFolder
     .add(uiScene, 'presetName', presetNames)
@@ -1392,9 +1559,12 @@ async function main(): Promise<void> {
     .onChange((mode: CameraMode) => {
       applyCameraMode(mode);
     });
-  cameraZoomCtrl = commonFolder
-    .add(params, 'cameraZoom', MIN_CAMERA_ZOOM, MAX_CAMERA_ZOOM, 0.01)
-    .name('缩放倍率');
+  cameraDistanceCtrl = commonFolder
+    .add(params, 'cameraDistance', MIN_CAMERA_DISTANCE, MAX_CAMERA_DISTANCE, 0.1)
+    .name('相机距离');
+  cameraFovCtrl = commonFolder
+    .add(params, 'cameraFovDeg', MIN_CAMERA_FOV_DEG, MAX_CAMERA_FOV_DEG, 1)
+    .name('FOV (°)');
   const resetViewCtrl = commonFolder
     .add(
       {
@@ -1584,6 +1754,21 @@ async function main(): Promise<void> {
     .listen();
 
   const antiAliasFolder = renderFolder.addFolder('抗锯齿');
+  resolutionFolder
+    .add(params, 'frameRateLimit', 0, MAX_FRAME_RATE_LIMIT, 1)
+    .name('FPS Cap')
+    .onChange((value: number) => {
+      params.frameRateLimit = Math.max(0, Math.round(value));
+    });
+
+  const backgroundFolder = renderFolder.addFolder('Background');
+  backgroundFolder
+    .add(params, 'skyboxPreset', skyboxOptions)
+    .name('Skybox')
+    .onChange(() => {
+      syncSkyboxTexture();
+    });
+
   const antialiasCtrl = antiAliasFolder
     .add(params, 'antialias', {
       关闭: 'off',
@@ -1876,9 +2061,7 @@ async function main(): Promise<void> {
     .add(audioState, 'enabled')
     .name('启用氛围音频')
     .onChange(async (v: boolean) => {
-      await ambientAudio.toggle(v);
-      audioState.enabled = ambientAudio.isEnabled();
-      refreshGuiDisplays();
+      await setAmbientAudioPreference(v);
     });
   const audioVolumeCtrl = audioFolder
     .add(audioState, 'volume', 0, 1, 0.01)
@@ -1996,6 +2179,7 @@ async function main(): Promise<void> {
   interactionFolder.close();
   renderFolder.close();
   resolutionFolder.close();
+  backgroundFolder.close();
   recordingFolder.close();
   timeWarpFolder.close();
   diskFolder.close();
@@ -2008,8 +2192,14 @@ async function main(): Promise<void> {
   bodyEditorFolder.close();
 
   refreshGuiLayout();
+  ambientAudio.setVolume(audioState.volume);
+  void ensureAmbientAudioActive();
 
-  function drawTrails(time: number, cameraPosOverride?: [number, number, number]): void {
+  function drawTrails(
+    time: number,
+    cameraPosOverride?: [number, number, number],
+    cameraTargetOverride?: [number, number, number],
+  ): void {
     if (!trailCanvas || !trailCtx) return;
     const w = trailCanvas.width;
     const h = trailCanvas.height;
@@ -2019,15 +2209,16 @@ async function main(): Promise<void> {
 
     const cam = getCameraLookBasis(
       time,
-      mouseX,
-      mouseY,
-      w,
-      h,
+      orbitYaw,
+      orbitPitch,
+      params.cameraDistance,
+      cameraTarget,
       params.mouseControl,
       params.frontView,
       params.topView,
       params.cameraRoll,
       cameraPosOverride,
+      cameraTargetOverride,
     );
 
     for (let bi = 0; bi < scene.bodyCount; bi++) {
@@ -2060,14 +2251,43 @@ async function main(): Promise<void> {
 
   async function frame(now: number): Promise<void> {
     try {
+      if (params.frameRateLimit !== appliedFrameRateLimit) {
+        appliedFrameRateLimit = params.frameRateLimit;
+        frameLimiterDeadlineMs = now;
+      }
+      if (params.frameRateLimit > 0) {
+        if (frameLimiterDeadlineMs === 0) {
+          frameLimiterDeadlineMs = now;
+        }
+        if (now + 0.25 < frameLimiterDeadlineMs) {
+          return;
+        }
+        const minFrameIntervalMs = 1000 / params.frameRateLimit;
+        do {
+          frameLimiterDeadlineMs += minFrameIntervalMs;
+        } while (frameLimiterDeadlineMs <= now);
+      } else {
+        frameLimiterDeadlineMs = now;
+      }
+
       const time = now / 1000;
       if (!pipeline) return;
+      const frameDeltaSeconds = Math.max(0, (now - fpsLastFrameTime) / 1000);
+      fpsLastFrameTime = now;
+      fpsFrameCounter += 1;
+      fpsAccumulatedSeconds += frameDeltaSeconds;
+      if (fpsOverlay && fpsAccumulatedSeconds >= 0.25) {
+        fpsOverlay.textContent = String(Math.max(0, Math.round(fpsFrameCounter / fpsAccumulatedSeconds)));
+        fpsFrameCounter = 0;
+        fpsAccumulatedSeconds = 0;
+      }
 
       const playbackFrame = recordingManager.getPlaybackFrame();
       if (playbackFrame) {
         const previousRenderScale = params.renderScale;
         Object.assign(params, {
-          cameraZoom: playbackFrame.render.cameraZoom,
+          cameraDistance: playbackFrame.render.cameraDistance,
+          cameraFovDeg: playbackFrame.render.cameraFovDeg,
           cameraRoll: playbackFrame.camera.roll,
           mouseControl: playbackFrame.camera.mouseControl,
           frontView: playbackFrame.camera.frontView,
@@ -2075,10 +2295,12 @@ async function main(): Promise<void> {
         });
         mouseX = playbackFrame.camera.mouseX ?? 0;
         mouseY = playbackFrame.camera.mouseY ?? 0;
-        captureOrbitPointerFromMouse();
+        cameraTarget = [...playbackFrame.camera.target];
+        captureOrbitStateFromMouse();
         applySceneState(scene, playbackFrame.scene);
         syncUiSceneFromScene(uiScene, scene);
         Object.assign(params, playbackFrame.render);
+        syncSkyboxTexture();
         if (Math.abs(params.renderScale - previousRenderScale) > 1e-6) {
           scheduleResizeNow('playback-render-scale');
         }
@@ -2091,19 +2313,21 @@ async function main(): Promise<void> {
 
       const cam = getCameraLookBasis(
         time,
-        mouseX,
-        mouseY,
-        canvas.width,
-        canvas.height,
+        orbitYaw,
+        orbitPitch,
+        params.cameraDistance,
+        cameraTarget,
         params.mouseControl,
         params.frontView,
         params.topView,
         params.cameraRoll,
         playbackFrame?.camera.position,
+        playbackFrame?.camera.target,
       );
       recordingManager.recordFrame(
         time,
         cam.cameraPos,
+        cam.cameraTarget,
         params.cameraRoll,
         params.mouseControl,
         params.frontView,
@@ -2141,6 +2365,7 @@ async function main(): Promise<void> {
       const aaMode = activeAntialiasMode;
       const renderMouseX = canvas.width > 0 ? mouseX * (rw / canvas.width) : 0;
       const renderMouseY = canvas.height > 0 ? mouseY * (rh / canvas.height) : 0;
+      const traceMaxDistance = computeTraceMaxDistance(cam.cameraPos);
 
       const sceneTargetFbo = mainMsaa ? mainMsaa.fbo : main.fbo;
       drawPass(gl, vao, passes.blackhole, sceneTargetFbo, rw, rh, time, () => {
@@ -2149,10 +2374,14 @@ async function main(): Promise<void> {
         setF(gl, p.program, p.uniforms, 'mouseY', renderMouseY);
         setI1(gl, p.program, p.uniforms, 'colorMap', 0);
         setI1(gl, p.program, p.uniforms, 'galaxy', 1);
+        setI1(gl, p.program, p.uniforms, 'galaxyPanorama', 2);
+        setF(gl, p.program, p.uniforms, 'galaxyMode', skybox.kind === 'panorama' ? 1 : 0);
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, colorMap);
         gl.activeTexture(gl.TEXTURE1);
-        gl.bindTexture(gl.TEXTURE_CUBE_MAP, galaxy);
+        gl.bindTexture(gl.TEXTURE_CUBE_MAP, skybox.cubemap);
+        gl.activeTexture(gl.TEXTURE2);
+        gl.bindTexture(gl.TEXTURE_2D, skybox.panorama);
 
         setF(gl, p.program, p.uniforms, 'fovScale', getViewFovScale());
         setF(gl, p.program, p.uniforms, 'gravatationalLensing', params.gravatationalLensing ? 1 : 0);
@@ -2162,7 +2391,11 @@ async function main(): Promise<void> {
         setF(gl, p.program, p.uniforms, 'frontView', params.frontView ? 1 : 0);
         setF(gl, p.program, p.uniforms, 'topView', params.topView ? 1 : 0);
         setF(gl, p.program, p.uniforms, 'playbackCamera', playbackFrame ? 1 : 0);
+        setF(gl, p.program, p.uniforms, 'traceMaxDistance', traceMaxDistance);
         setV3(gl, p.program, p.uniforms, 'cameraWorld', cam.cameraPos[0], cam.cameraPos[1], cam.cameraPos[2]);
+        setV3(gl, p.program, p.uniforms, 'cameraRight', cam.uu[0], cam.uu[1], cam.uu[2]);
+        setV3(gl, p.program, p.uniforms, 'cameraUp', cam.vv[0], cam.vv[1], cam.vv[2]);
+        setV3(gl, p.program, p.uniforms, 'cameraForward', cam.ww[0], cam.ww[1], cam.ww[2]);
         setV3(
           gl,
           p.program,
@@ -2344,7 +2577,7 @@ async function main(): Promise<void> {
       });
     }
 
-    drawTrails(time, playbackFrame?.camera.position);
+    drawTrails(time, playbackFrame?.camera.position, playbackFrame?.camera.target);
     firstFrame = false;
     } finally {
       requestAnimationFrame(frame);

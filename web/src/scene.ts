@@ -58,7 +58,7 @@ export function defaultBodyParams(kind: BodyKind): BodyParams {
     },
     whiteHole: {
       size: 1.15,
-      glowColor: '#eaf6ff',
+      glowColor: '#ffe08f',
       glowIntensity: 3.5,
       adiskIntensity: 1.2,
       distortionStrength: 1,
@@ -79,6 +79,46 @@ export function cloneSceneState(s: SceneState): SceneState {
 }
 
 /** 将 src 深拷贝到 target，保持 target 对象引用不变（便于 lil-gui 绑定） */
+export function normalizeSceneForNBody(scene: SceneState): void {
+  if (scene.bodyCount < 1) return;
+
+  const anchor = scene.bodies[0]!;
+  const offsetX = -anchor.position[0];
+  const offsetY = -anchor.position[1];
+  const offsetZ = -anchor.position[2];
+
+  for (let i = 0; i < scene.bodyCount; i++) {
+    const body = scene.bodies[i]!;
+    body.position[0] += offsetX;
+    body.position[1] += offsetY;
+    body.position[2] += offsetZ;
+  }
+
+  let totalMass = 0;
+  let momentumX = 0;
+  let momentumY = 0;
+  let momentumZ = 0;
+  for (let i = 0; i < scene.bodyCount; i++) {
+    const body = scene.bodies[i]!;
+    totalMass += body.mass;
+    momentumX += body.mass * body.velocity[0];
+    momentumY += body.mass * body.velocity[1];
+    momentumZ += body.mass * body.velocity[2];
+  }
+
+  const invTotalMass = totalMass > 1e-6 ? 1 / totalMass : 0;
+  const centerVelocityX = momentumX * invTotalMass;
+  const centerVelocityY = momentumY * invTotalMass;
+  const centerVelocityZ = momentumZ * invTotalMass;
+
+  for (let i = 0; i < scene.bodyCount; i++) {
+    const body = scene.bodies[i]!;
+    body.velocity[0] -= centerVelocityX;
+    body.velocity[1] -= centerVelocityY;
+    body.velocity[2] -= centerVelocityZ;
+  }
+}
+
 export function applySceneState(target: SceneState, src: SceneState): void {
   target.bodyCount = src.bodyCount;
   target.dynamics = src.dynamics;

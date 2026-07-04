@@ -5,6 +5,7 @@ import {
   cloneSceneState,
   defaultBodyParams,
   MAX_BODIES,
+  normalizeSceneForNBody,
 } from './scene.js';
 
 function makeBody(
@@ -114,6 +115,7 @@ const presetNBody: SceneState = (() => {
     2,
     'neutronStar',
   );
+  normalizeSceneForNBody(s);
   return s;
 })();
 

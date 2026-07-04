@@ -29,11 +29,27 @@
         height: 100%;
         pointer-events: none;
       }
+      #fps {
+        position: fixed;
+        left: 12px;
+        top: 10px;
+        z-index: 40;
+        pointer-events: none;
+        color: #fff;
+        font: 700 28px/1 ui-monospace, SFMono-Regular, Consolas, monospace;
+        text-shadow:
+          -1px -1px 0 #000,
+          1px -1px 0 #000,
+          -1px 1px 0 #000,
+          1px 1px 0 #000,
+          0 0 6px rgba(0, 0, 0, 0.6);
+      }
     </style>
   </head>
   <body>
     <canvas id="c"></canvas>
     <canvas id="trail" aria-hidden="true"></canvas>
+    <div id="fps" aria-hidden="true">0</div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

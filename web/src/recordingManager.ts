@@ -16,9 +16,11 @@ const RENDER_BOOLEAN_FIELDS = [
   'tonemappingEnabled',
 ] as const;
 const RENDER_NUMBER_FIELDS = [
-  'cameraZoom',
+  'cameraDistance',
+  'cameraFovDeg',
   'renderScale',
   'fsrSharpness',
+  'frameRateLimit',
   'adiskDensityV',
   'adiskDensityH',
   'adiskHeight',
@@ -36,14 +38,17 @@ const RENDER_NUMBER_FIELDS = [
 ] as const;
 
 const RENDER_STATE_DEFAULTS = {
-  cameraZoom: 1,
-  renderScale: 1,
+  cameraDistance: 15,
+  cameraFovDeg: 100,
+  renderScale: 0.6,
   upscaleMode: 'fsr1',
   fsrSharpness: 0.2,
-  dopplerEnabled: false,
+  frameRateLimit: 60,
+  skyboxPreset: 'skybox_nebula_dark',
+  dopplerEnabled: true,
   dopplerStrength: 1.0,
   dopplerBeta: 0.35,
-  beamingEnabled: false,
+  beamingEnabled: true,
   beamingPower: 3.5,
   spinEnabled: false,
   spinA: 0.7,
@@ -84,6 +89,10 @@ function isCameraPosition(value: unknown): value is [number, number, number] {
   return isVec3Within(value, MAX_RECORDED_VECTOR_ABS) && Math.hypot(...value) > MIN_CAMERA_DISTANCE;
 }
 
+function isCameraTarget(value: unknown): value is [number, number, number] {
+  return isVec3Within(value, MAX_RECORDED_VECTOR_ABS);
+}
+
 function isHexColor(value: unknown): value is string {
   return typeof value === 'string' && /^#[0-9a-fA-F]{6}$/.test(value);
 }
@@ -98,6 +107,14 @@ function isDynamicsMode(value: unknown): value is SceneState['dynamics'] {
 
 function isUpscaleMode(value: unknown): value is RecordingFrame['render']['upscaleMode'] {
   return typeof value === 'string' && UPSCALE_MODES.includes(value as (typeof UPSCALE_MODES)[number]);
+}
+
+function isSkyboxPreset(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 128;
+}
+
+function legacyZoomToFovDeg(zoom: number): number {
+  return (2 * Math.atan(0.5 / Math.max(zoom, 1e-6)) * 180) / Math.PI;
 }
 
 function isBodyVisual(value: unknown): value is SceneState['bodies'][number]['visual'] {
@@ -161,10 +178,13 @@ function isRenderState(value: unknown): value is RecordingFrame['render'] {
     isNumberInRange(value.adiskDensityV, 0, 10) &&
     isNumberInRange(value.adiskDensityH, 0, 10) &&
     isNumberInRange(value.adiskHeight, 0, 1) &&
-    isNumberInRange(value.cameraZoom, 0.15, 2.4) &&
+    isNumberInRange(value.cameraDistance, 0.2, 50) &&
+    isNumberInRange(value.cameraFovDeg, 15, 140) &&
     isNumberInRange(value.renderScale, 0.35, 1.5) &&
     isNumberInRange(value.fsrSharpness, 0, 2) &&
+    isIntegerInRange(value.frameRateLimit, 0, 240) &&
     isUpscaleMode(value.upscaleMode) &&
+    isSkyboxPreset(value.skyboxPreset) &&
     isNumberInRange(value.adiskLit, 0, 4) &&
     isIntegerInRange(value.adiskNoiseLOD, 1, 12) &&
     isNumberInRange(value.adiskNoiseScale, 0, 10) &&
@@ -184,6 +204,7 @@ function isRecordingFrame(value: unknown): value is RecordingFrame {
   return (
     isNumberInRange(value.timestamp, 0, MAX_RECORDING_DURATION_SECONDS) &&
     isCameraPosition(value.camera.position) &&
+    isCameraTarget(value.camera.target) &&
     isNumberInRange(value.camera.roll, -180, 180) &&
     typeof value.camera.mouseControl === 'boolean' &&
     typeof value.camera.frontView === 'boolean' &&
@@ -244,13 +265,26 @@ function parseRecordingFrames(data: unknown): RecordingFrame[] | null {
     return null;
   }
   const framesWithDefaults = data.frames.map((frame) => {
-    if (!isObject(frame) || !isObject(frame.render)) return frame;
+    if (!isObject(frame) || !isObject(frame.render) || !isObject(frame.camera)) return frame;
     const normalizedUpscaleMode = frame.render.upscaleMode === 'fsrLike' ? 'fsr1' : frame.render.upscaleMode;
+    const legacyZoom = isFiniteNumber(frame.render.cameraZoom) ? frame.render.cameraZoom : null;
     return {
       ...frame,
+      camera: {
+        ...frame.camera,
+        target: isCameraTarget(frame.camera.target) ? frame.camera.target : [0, 0, 0],
+      },
       render: {
         ...RENDER_STATE_DEFAULTS,
         ...frame.render,
+        cameraDistance: isFiniteNumber(frame.render.cameraDistance)
+          ? frame.render.cameraDistance
+          : RENDER_STATE_DEFAULTS.cameraDistance,
+        cameraFovDeg: isFiniteNumber(frame.render.cameraFovDeg)
+          ? frame.render.cameraFovDeg
+          : legacyZoom !== null
+            ? legacyZoomToFovDeg(legacyZoom)
+            : RENDER_STATE_DEFAULTS.cameraFovDeg,
         upscaleMode: normalizedUpscaleMode,
       },
     };
@@ -270,6 +304,7 @@ function parseRecordingFrames(data: unknown): RecordingFrame[] | null {
     timestamp: frame.timestamp,
     camera: {
       position: [...frame.camera.position],
+      target: [...frame.camera.target],
       roll: frame.camera.roll,
       mouseControl: frame.camera.mouseControl,
       frontView: frame.camera.frontView,
@@ -281,10 +316,13 @@ function parseRecordingFrames(data: unknown): RecordingFrame[] | null {
     render: {
       gravatationalLensing: frame.render.gravatationalLensing,
       renderBlackHole: frame.render.renderBlackHole,
-      cameraZoom: frame.render.cameraZoom,
+      cameraDistance: frame.render.cameraDistance,
+      cameraFovDeg: frame.render.cameraFovDeg,
       renderScale: frame.render.renderScale,
       fsrSharpness: frame.render.fsrSharpness,
+      frameRateLimit: frame.render.frameRateLimit,
       upscaleMode: frame.render.upscaleMode,
+      skyboxPreset: frame.render.skyboxPreset,
       adiskEnabled: frame.render.adiskEnabled,
       adiskParticle: frame.render.adiskParticle,
       adiskDensityV: frame.render.adiskDensityV,
@@ -319,6 +357,7 @@ export interface RecordingFrame {
   /** 相机状态 */
   camera: {
     position: [number, number, number];
+    target: [number, number, number];
     roll: number;
     mouseControl: boolean;
     frontView: boolean;
@@ -334,10 +373,13 @@ export interface RecordingFrame {
   render: {
     gravatationalLensing: boolean;
     renderBlackHole: boolean;
-    cameraZoom: number;
+    cameraDistance: number;
+    cameraFovDeg: number;
     renderScale: number;
     fsrSharpness: number;
+    frameRateLimit: number;
     upscaleMode: 'bicubic' | 'lanczos' | 'fsr1';
+    skyboxPreset: string;
     adiskEnabled: boolean;
     adiskParticle: boolean;
     adiskDensityV: number;
@@ -403,6 +445,7 @@ export class RecordingManager {
   recordFrame(
     time: number,
     cameraPos: [number, number, number],
+    cameraTarget: [number, number, number],
     cameraRoll: number,
     mouseControl: boolean,
     frontView: boolean,
@@ -413,10 +456,13 @@ export class RecordingManager {
     params: {
       gravatationalLensing: boolean;
       renderBlackHole: boolean;
-      cameraZoom: number;
+      cameraDistance: number;
+      cameraFovDeg: number;
       renderScale: number;
       fsrSharpness: number;
+      frameRateLimit: number;
       upscaleMode: 'bicubic' | 'lanczos' | 'fsr1';
+      skyboxPreset: string;
       adiskEnabled: boolean;
       adiskParticle: boolean;
       adiskDensityV: number;
@@ -456,6 +502,7 @@ export class RecordingManager {
       timestamp: elapsedTime,
       camera: {
         position: [...cameraPos],
+        target: [...cameraTarget],
         roll: cameraRoll,
         mouseControl,
         frontView,
@@ -467,10 +514,13 @@ export class RecordingManager {
       render: {
         gravatationalLensing: params.gravatationalLensing,
         renderBlackHole: params.renderBlackHole,
-        cameraZoom: params.cameraZoom,
+        cameraDistance: params.cameraDistance,
+        cameraFovDeg: params.cameraFovDeg,
         renderScale: params.renderScale,
         fsrSharpness: params.fsrSharpness,
+        frameRateLimit: params.frameRateLimit,
         upscaleMode: params.upscaleMode,
+        skyboxPreset: params.skyboxPreset,
         adiskEnabled: params.adiskEnabled,
         adiskParticle: params.adiskParticle,
         adiskDensityV: params.adiskDensityV,

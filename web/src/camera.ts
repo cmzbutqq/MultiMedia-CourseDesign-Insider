@@ -1,9 +1,32 @@
-/** 与 blackhole_main.frag 中 main() 相机一致 */
-
 const PI = Math.PI;
-const ORBIT_RADIUS = 15;
-const ORBIT_YAW_RANGE = PI * 2.0;
 const ORBIT_PITCH_RANGE = PI * 0.75;
+
+function normalizeVec3(
+  x: number,
+  y: number,
+  z: number,
+): [number, number, number] {
+  const len = Math.hypot(x, y, z) || 1;
+  return [x / len, y / len, z / len];
+}
+
+function scaleDirection(
+  direction: [number, number, number],
+  distance: number,
+): [number, number, number] {
+  return [
+    direction[0] * distance,
+    direction[1] * distance,
+    direction[2] * distance,
+  ];
+}
+
+function addVec3(
+  a: [number, number, number],
+  b: [number, number, number],
+): [number, number, number] {
+  return [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+}
 
 function degToRad(d: number): number {
   return (d * PI) / 180;
@@ -11,48 +34,45 @@ function degToRad(d: number): number {
 
 export function getCameraLookBasis(
   time: number,
-  mouseX: number,
-  mouseY: number,
-  resolutionX: number,
-  resolutionY: number,
+  orbitYaw: number,
+  orbitPitch: number,
+  cameraDistance: number,
+  cameraTarget: [number, number, number],
   mouseControl: boolean,
   frontView: boolean,
   topView: boolean,
   cameraRollDeg: number,
   cameraPosOverride?: [number, number, number],
+  cameraTargetOverride?: [number, number, number],
 ): {
   cameraPos: [number, number, number];
+  cameraTarget: [number, number, number];
   uu: [number, number, number];
   vv: [number, number, number];
   ww: [number, number, number];
 } {
   let cameraPos: [number, number, number];
+  const distance = Math.max(cameraDistance, 0.001);
+  const target = cameraTargetOverride ? [...cameraTargetOverride] : [...cameraTarget];
   if (cameraPosOverride) {
     cameraPos = [...cameraPosOverride];
   } else if (frontView) {
-    cameraPos = [10, 1, 10];
+    cameraPos = addVec3(target, scaleDirection(normalizeVec3(10, 1, 10), distance));
   } else if (topView) {
-    cameraPos = [15, 15, 0];
+    cameraPos = addVec3(target, scaleDirection(normalizeVec3(15, 15, 0), distance));
   } else if (mouseControl) {
-    const orbitX = Math.max(0, Math.min(1, mouseX / resolutionX));
-    const orbitY = Math.max(0, Math.min(1, mouseY / resolutionY));
-    const yaw = (orbitX - 0.5) * ORBIT_YAW_RANGE;
-    const pitch = (0.5 - orbitY) * ORBIT_PITCH_RANGE;
+    const pitch = Math.max(-ORBIT_PITCH_RANGE * 0.5, Math.min(ORBIT_PITCH_RANGE * 0.5, orbitPitch));
     const cosPitch = Math.cos(pitch);
     cameraPos = [
-      -Math.cos(yaw) * cosPitch * ORBIT_RADIUS,
-      Math.sin(pitch) * ORBIT_RADIUS,
-      Math.sin(yaw) * cosPitch * ORBIT_RADIUS,
+      target[0] - Math.cos(orbitYaw) * cosPitch * distance,
+      target[1] + Math.sin(pitch) * distance,
+      target[2] + Math.sin(orbitYaw) * cosPitch * distance,
     ];
   } else {
-    cameraPos = [
-      -Math.cos(time * 0.1) * 15,
-      Math.sin(time * 0.1) * 15,
-      Math.sin(time * 0.1) * 15,
-    ];
+    const autoDirection = normalizeVec3(-Math.cos(time * 0.1), Math.sin(time * 0.1), Math.sin(time * 0.1));
+    cameraPos = addVec3(target, scaleDirection(autoDirection, distance));
   }
 
-  const target: [number, number, number] = [0, 0, 0];
   const roll = degToRad(cameraRollDeg);
   let rr: [number, number, number] = [Math.sin(roll), Math.cos(roll), 0];
 
@@ -79,7 +99,7 @@ export function getCameraLookBasis(
   const vLen = Math.hypot(vRaw[0], vRaw[1], vRaw[2]) || 1;
   const vv: [number, number, number] = [vRaw[0] / vLen, vRaw[1] / vLen, vRaw[2] / vLen];
 
-  return { cameraPos, uu, vv, ww };
+  return { cameraPos, cameraTarget: target, uu, vv, ww };
 }
 
 export function worldToScreenPx(
@@ -100,7 +120,6 @@ export function worldToScreenPx(
   const puvX = -xc / (zc * fovScale);
   const puvY = yc / (zc * fovScale);
   const px = width * 0.5 + puvX * height;
-  // Canvas2D 的 y 轴向下，需将相机空间 y 投影翻转到屏幕坐标。
   const py = height * (0.5 - puvY);
   if (!Number.isFinite(px) || !Number.isFinite(py)) return null;
   return { x: px, y: py };
