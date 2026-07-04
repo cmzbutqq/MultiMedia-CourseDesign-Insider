@@ -4,7 +4,10 @@ const DEFAULT_CAMERA_POS: [number, number, number] = [0, 0, 18];
 
 const DISTANCE_REF_NEAR = 8;
 const DISTANCE_REF_FAR = 72;
-const MAX_DISTANCE_ATTENUATION_DB = 10;
+const MIN_LOUDNESS_DB = -10;
+const MAX_LOUDNESS_DB = 0;
+const DISTANCE_LOUDNESS_WEIGHT = 0.65;
+const MASS_LOUDNESS_WEIGHT = 0.35;
 
 const MASS_REF_MIN = 0.5;
 const MASS_REF_MAX = 25;
@@ -20,11 +23,17 @@ const VIBRATO_RATE_MAX_HZ = 8.2;
 const VIBRATO_DEPTH_MAX_CENTS = 22;
 
 const MAX_OCTAVE_RATIO = Math.pow(10, -4 / 20);
-const VOICE_GAIN = 0.065;
-const EVENT_GAIN = 0.1;
-const GAIN_RESPONSE = 0.08;
-const FREQ_RESPONSE = 0.06;
+const VOICE_GAIN_CEILING = 0.055;
+const EVENT_GAIN_CEILING = 0.085;
 const REVERB_MAX = 0.18;
+const REVERB_SMOOTH = 0.12;
+const DRY_SMOOTH = 0.12;
+const GAIN_SMOOTH = 0.18;
+const FREQ_SMOOTH = 0.16;
+const VIBRATO_SMOOTH = 0.16;
+const ANALYSIS_INTERVAL_SECONDS = 0.1;
+const MAX_PENDING_ENCOUNTER_BURSTS = 16;
+const MAX_ACTIVE_ENCOUNTER_BURSTS = 4;
 
 const ENCOUNTER_COOLDOWN_SECONDS = 0.28;
 const ENCOUNTER_RESET_MULTIPLIER = 1.45;
@@ -37,11 +46,28 @@ interface BodyVoice {
   octaveGain: GainNode;
   vibratoOsc: OscillatorNode;
   vibratoDetuneGain: GainNode;
+  targetMainFreq: number;
+  targetOctaveFreq: number;
+  targetMainGain: number;
+  targetOctaveGain: number;
+  targetVibratoRate: number;
+  targetVibratoDepth: number;
+  smoothMainFreq: number;
+  smoothOctaveFreq: number;
+  smoothMainGain: number;
+  smoothOctaveGain: number;
+  smoothVibratoRate: number;
+  smoothVibratoDepth: number;
 }
 
 interface EncounterState {
   engaged: boolean;
   cooldownUntil: number;
+}
+
+interface EncounterBurstRequest {
+  frequencyHz: number;
+  gainAmount: number;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -77,10 +103,17 @@ export class AmbientAudioEngine {
 
   private voices: BodyVoice[] = [];
   private encounterStates = new Map<string, EncounterState>();
+  private pendingEncounterBursts: EncounterBurstRequest[] = [];
+  private activeEncounterBursts = 0;
 
   private reverbConvolver: ConvolverNode | null = null;
   private reverbGain: GainNode | null = null;
   private dryGain: GainNode | null = null;
+  private targetReverbMix = 0.06;
+  private targetDryMix = 1;
+  private smoothReverbMix = 0.06;
+  private smoothDryMix = 1;
+  private lastAnalysisTime = Number.NEGATIVE_INFINITY;
 
   private initialized = false;
 
@@ -179,6 +212,18 @@ export class AmbientAudioEngine {
         octaveGain,
         vibratoOsc,
         vibratoDetuneGain,
+        targetMainFreq: 220,
+        targetOctaveFreq: 440,
+        targetMainGain: 0,
+        targetOctaveGain: 0,
+        targetVibratoRate: VIBRATO_RATE_MIN_HZ,
+        targetVibratoDepth: 0,
+        smoothMainFreq: 220,
+        smoothOctaveFreq: 440,
+        smoothMainGain: 0,
+        smoothOctaveGain: 0,
+        smoothVibratoRate: VIBRATO_RATE_MIN_HZ,
+        smoothVibratoDepth: 0,
       });
     }
   }
@@ -190,9 +235,12 @@ export class AmbientAudioEngine {
     if (next) {
       if (!this.initialized) await this.init();
       if (this.ctx?.state === 'suspended') await this.ctx.resume();
+      this.lastAnalysisTime = Number.NEGATIVE_INFINITY;
       this.enabled = true;
     } else {
       this.enabled = false;
+      this.pendingEncounterBursts = [];
+      this.activeEncounterBursts = 0;
       if (this.ctx?.state === 'running') await this.ctx.suspend();
     }
   }
@@ -208,8 +256,18 @@ export class AmbientAudioEngine {
     if (!this.enabled || !this.ctx) return;
 
     const now = this.ctx.currentTime;
-    const activeBodyCount = Math.max(scene.bodyCount, 1);
+    if (now - this.lastAnalysisTime >= ANALYSIS_INTERVAL_SECONDS) {
+      this.sampleScene(scene, cameraPos, now);
+      this.lastAnalysisTime = now;
+    }
+    this.applyTargets();
+  }
 
+  private sampleScene(
+    scene: SceneState,
+    cameraPos: [number, number, number],
+    now: number,
+  ): void {
     let sceneCenterX = 0;
     let sceneCenterY = 0;
     let sceneCenterZ = 0;
@@ -236,27 +294,24 @@ export class AmbientAudioEngine {
       if (spread > sceneSpread) sceneSpread = spread;
     }
 
-    const targetReverbMix = clamp(
+    this.targetReverbMix = clamp(
       0.04 + sceneSpread / 120 + (scene.timeWarp.enabled ? scene.timeWarp.intensity * 0.08 : 0),
       0.04,
       REVERB_MAX,
     );
-    this.reverbGain?.gain.setTargetAtTime(targetReverbMix, now, 0.2);
-    this.dryGain?.gain.setTargetAtTime(1 - targetReverbMix * 0.3, now, 0.2);
+    this.targetDryMix = 1 - this.targetReverbMix * 0.3;
 
     for (let i = 0; i < this.voices.length; i++) {
       const voice = this.voices[i]!;
       if (i >= scene.bodyCount) {
-        voice.mainGain.gain.setTargetAtTime(0, now, GAIN_RESPONSE);
-        voice.octaveGain.gain.setTargetAtTime(0, now, GAIN_RESPONSE);
-        voice.vibratoDetuneGain.gain.setTargetAtTime(0, now, GAIN_RESPONSE);
+        voice.targetMainGain = 0;
+        voice.targetOctaveGain = 0;
+        voice.targetVibratoDepth = 0;
         continue;
       }
 
       const body = scene.bodies[i]!;
       const distance = distanceBetween(body.position, cameraPos);
-      const distanceGain = this.distanceGain(distance);
-
       const speed = length3(body.velocity[0], body.velocity[1], body.velocity[2]);
       const speedNorm = clamp(speed / SPEED_REF, 0, 1);
       const vibratoRate = lerp(VIBRATO_RATE_MIN_HZ, VIBRATO_RATE_MAX_HZ, speedNorm);
@@ -266,35 +321,71 @@ export class AmbientAudioEngine {
       const pitchBendHz = this.pitchBendFromRadialVelocity(body, cameraPos);
       const pitchRatio = clamp(1 + pitchBendHz / Math.max(baseFreq, 1), 0.25, 2.0);
 
-      const mainFreq = baseFreq * pitchRatio;
-      const octaveFreq = baseFreq * 2 * pitchRatio;
+      voice.targetMainFreq = baseFreq * pitchRatio;
+      voice.targetOctaveFreq = baseFreq * 2 * pitchRatio;
 
-      const mainGain = (VOICE_GAIN / Math.sqrt(activeBodyCount)) * distanceGain;
+      const mainGain = VOICE_GAIN_CEILING * this.loudnessGainFromMassAndDistance(body.mass, distance);
       const octaveMix = clamp(body.visual.adiskIntensity / 3, 0, 1) * MAX_OCTAVE_RATIO;
-      const octaveGain = mainGain * octaveMix;
-
-      voice.mainOsc.frequency.setTargetAtTime(mainFreq, now, FREQ_RESPONSE);
-      voice.octaveOsc.frequency.setTargetAtTime(octaveFreq, now, FREQ_RESPONSE);
-      voice.mainGain.gain.setTargetAtTime(mainGain, now, GAIN_RESPONSE);
-      voice.octaveGain.gain.setTargetAtTime(octaveGain, now, GAIN_RESPONSE);
-      voice.vibratoOsc.frequency.setTargetAtTime(vibratoRate, now, 0.12);
-      voice.vibratoDetuneGain.gain.setTargetAtTime(vibratoDepth, now, 0.12);
+      voice.targetMainGain = mainGain;
+      voice.targetOctaveGain = mainGain * octaveMix;
+      voice.targetVibratoRate = vibratoRate;
+      voice.targetVibratoDepth = vibratoDepth;
     }
 
-    this.updateEncounterBursts(scene, cameraPos, now, activeBodyCount);
+    this.updateEncounterBursts(scene, cameraPos, now);
+    this.processEncounterBurstQueue(now);
   }
 
-  private distanceGain(distance: number): number {
-    const falloff = smoothstep(DISTANCE_REF_NEAR, DISTANCE_REF_FAR, distance);
-    return dbToGain(-MAX_DISTANCE_ATTENUATION_DB * falloff);
+  private applyTargets(): void {
+    this.smoothReverbMix = lerp(this.smoothReverbMix, this.targetReverbMix, REVERB_SMOOTH);
+    this.smoothDryMix = lerp(this.smoothDryMix, this.targetDryMix, DRY_SMOOTH);
+    if (this.reverbGain) {
+      this.reverbGain.gain.value = this.smoothReverbMix;
+    }
+    if (this.dryGain) {
+      this.dryGain.gain.value = this.smoothDryMix;
+    }
+
+    for (const voice of this.voices) {
+      voice.smoothMainFreq = lerp(voice.smoothMainFreq, voice.targetMainFreq, FREQ_SMOOTH);
+      voice.smoothOctaveFreq = lerp(voice.smoothOctaveFreq, voice.targetOctaveFreq, FREQ_SMOOTH);
+      voice.smoothMainGain = lerp(voice.smoothMainGain, voice.targetMainGain, GAIN_SMOOTH);
+      voice.smoothOctaveGain = lerp(voice.smoothOctaveGain, voice.targetOctaveGain, GAIN_SMOOTH);
+      voice.smoothVibratoRate = lerp(voice.smoothVibratoRate, voice.targetVibratoRate, VIBRATO_SMOOTH);
+      voice.smoothVibratoDepth = lerp(voice.smoothVibratoDepth, voice.targetVibratoDepth, VIBRATO_SMOOTH);
+
+      voice.mainOsc.frequency.value = voice.smoothMainFreq;
+      voice.octaveOsc.frequency.value = voice.smoothOctaveFreq;
+      voice.mainGain.gain.value = voice.smoothMainGain;
+      voice.octaveGain.gain.value = voice.smoothOctaveGain;
+      voice.vibratoOsc.frequency.value = voice.smoothVibratoRate;
+      voice.vibratoDetuneGain.gain.value = voice.smoothVibratoDepth;
+    }
   }
 
-  private frequencyFromMass(mass: number): number {
+  private distanceLoudnessDb(distance: number): number {
+    const proximity = 1 - smoothstep(DISTANCE_REF_NEAR, DISTANCE_REF_FAR, distance);
+    return lerp(MIN_LOUDNESS_DB, MAX_LOUDNESS_DB, proximity);
+  }
+
+  private massNorm(mass: number): number {
     const minLog = Math.log(MASS_REF_MIN);
     const maxLog = Math.log(MASS_REF_MAX);
     const safeMass = clamp(mass, MASS_REF_MIN, MASS_REF_MAX);
-    const massNorm = clamp((Math.log(safeMass) - minLog) / (maxLog - minLog), 0, 1);
-    return lerp(BASE_FREQ_MAX_HZ, BASE_FREQ_MIN_HZ, massNorm);
+    return clamp((Math.log(safeMass) - minLog) / (maxLog - minLog), 0, 1);
+  }
+
+  private loudnessGainFromMassAndDistance(mass: number, distance: number): number {
+    const distanceDb = this.distanceLoudnessDb(distance);
+    const massDb = lerp(MIN_LOUDNESS_DB, MAX_LOUDNESS_DB, this.massNorm(mass));
+    const combinedDb =
+      distanceDb * DISTANCE_LOUDNESS_WEIGHT +
+      massDb * MASS_LOUDNESS_WEIGHT;
+    return dbToGain(combinedDb);
+  }
+
+  private frequencyFromMass(mass: number): number {
+    return lerp(BASE_FREQ_MAX_HZ, BASE_FREQ_MIN_HZ, this.massNorm(mass));
   }
 
   private pitchBendFromRadialVelocity(body: SceneBody, cameraPos: [number, number, number]): number {
@@ -313,7 +404,6 @@ export class AmbientAudioEngine {
     scene: SceneState,
     cameraPos: [number, number, number],
     now: number,
-    activeBodyCount: number,
   ): void {
     for (let i = 0; i < scene.bodyCount; i++) {
       const bodyA = scene.bodies[i]!;
@@ -344,9 +434,12 @@ export class AmbientAudioEngine {
           continue;
         }
 
-        this.triggerEncounterBurst(bodyA, bodyB, relativeSpeed, cameraPos, activeBodyCount, now);
-        state.engaged = true;
-        state.cooldownUntil = now + ENCOUNTER_COOLDOWN_SECONDS;
+        if (this.enqueueEncounterBurst(bodyA, bodyB, relativeSpeed, cameraPos)) {
+          state.engaged = true;
+          state.cooldownUntil = now + ENCOUNTER_COOLDOWN_SECONDS;
+        } else {
+          state.cooldownUntil = now + ANALYSIS_INTERVAL_SECONDS;
+        }
       }
     }
   }
@@ -359,15 +452,15 @@ export class AmbientAudioEngine {
     return created;
   }
 
-  private triggerEncounterBurst(
+  private enqueueEncounterBurst(
     bodyA: SceneBody,
     bodyB: SceneBody,
     relativeSpeed: number,
     cameraPos: [number, number, number],
-    activeBodyCount: number,
-    now: number,
-  ): void {
-    if (!this.ctx || !this.masterGain) return;
+  ): boolean {
+    if (this.pendingEncounterBursts.length >= MAX_PENDING_ENCOUNTER_BURSTS) {
+      return false;
+    }
 
     const midpoint: [number, number, number] = [
       (bodyA.position[0] + bodyB.position[0]) * 0.5,
@@ -375,27 +468,51 @@ export class AmbientAudioEngine {
       (bodyA.position[2] + bodyB.position[2]) * 0.5,
     ];
     const midpointDistance = distanceBetween(midpoint, cameraPos);
-    const distanceGain = this.distanceGain(midpointDistance);
     const eventStrength = clamp(relativeSpeed / (SPEED_REF * 1.2), 0.35, 1);
     const bodyMass = (bodyA.mass + bodyB.mass) * 0.5;
     const eventFreq = clamp(this.frequencyFromMass(bodyMass) * 1.6 + relativeSpeed * 10, 180, 720);
-    const gainAmount = (EVENT_GAIN / Math.sqrt(activeBodyCount)) * distanceGain * eventStrength;
+    const gainAmount =
+      EVENT_GAIN_CEILING *
+      this.loudnessGainFromMassAndDistance(bodyMass, midpointDistance) *
+      eventStrength;
+
+    this.pendingEncounterBursts.push({
+      frequencyHz: eventFreq,
+      gainAmount,
+    });
+    return true;
+  }
+
+  private processEncounterBurstQueue(now: number): void {
+    while (
+      this.pendingEncounterBursts.length > 0 &&
+      this.activeEncounterBursts < MAX_ACTIVE_ENCOUNTER_BURSTS
+    ) {
+      const burst = this.pendingEncounterBursts.shift()!;
+      this.playEncounterBurst(burst, now);
+    }
+  }
+
+  private playEncounterBurst(burst: EncounterBurstRequest, now: number): void {
+    if (!this.ctx || !this.masterGain) return;
 
     const osc = this.ctx.createOscillator();
     osc.type = 'sine';
-    osc.frequency.setValueAtTime(eventFreq * 1.12, now);
-    osc.frequency.exponentialRampToValueAtTime(eventFreq, now + 0.16);
+    osc.frequency.setValueAtTime(burst.frequencyHz * 1.12, now);
+    osc.frequency.exponentialRampToValueAtTime(burst.frequencyHz, now + 0.16);
 
     const gain = this.ctx.createGain();
     gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.linearRampToValueAtTime(gainAmount, now + 0.01);
+    gain.gain.linearRampToValueAtTime(burst.gainAmount, now + 0.01);
     gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
 
     osc.connect(gain);
     gain.connect(this.masterGain);
+    this.activeEncounterBursts++;
     osc.start(now);
     osc.stop(now + 0.2);
     osc.onended = () => {
+      this.activeEncounterBursts = Math.max(0, this.activeEncounterBursts - 1);
       osc.disconnect();
       gain.disconnect();
     };
@@ -409,12 +526,19 @@ export class AmbientAudioEngine {
     }
     this.voices = [];
     this.encounterStates.clear();
+    this.pendingEncounterBursts = [];
+    this.activeEncounterBursts = 0;
     this.ctx?.close();
     this.ctx = null;
     this.masterGain = null;
     this.reverbConvolver = null;
     this.reverbGain = null;
     this.dryGain = null;
+    this.targetReverbMix = 0.06;
+    this.targetDryMix = 1;
+    this.smoothReverbMix = 0.06;
+    this.smoothDryMix = 1;
+    this.lastAnalysisTime = Number.NEGATIVE_INFINITY;
     this.initialized = false;
     this.enabled = false;
   }
