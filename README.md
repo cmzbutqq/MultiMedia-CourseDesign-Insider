@@ -106,4 +106,9 @@ docker compose down
 
 ## License
 
+## Upstream Reference
+
+This project references ideas and source study from `rossning92/Blackhole`.
+See [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) for the attribution note used in this repository.
+
 当前仓库主要用于课程作业与学习研究。
