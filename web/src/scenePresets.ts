@@ -39,7 +39,7 @@ export function createDefaultScene(): SceneState {
     nbodyG: 2,
     softening: 0.15,
     dt: 0.02,
-    showTrails: false,
+    showTrails: true,
     timeWarp: {
       enabled: false,
       intensity: 0.5,
@@ -55,9 +55,14 @@ const presetBinary: SceneState = (() => {
   const s = createDefaultScene();
   s.bodyCount = 2;
   s.bodies[0] = makeBody([0, 0, 0], [0, 0, 0], 12, 'blackHole');
-  s.bodies[1] = makeBody([8, 0, 0], [0, 0, 6], 2, 'neutronStar');
   s.dynamics = 'kepler';
   s.gmCentral = 80;
+  s.bodies[1] = makeBody(
+    [8, 0, 0],
+    [0, 0, 3.1614],
+    2,
+    'whiteHole',
+  );
   return s;
 })();
 
@@ -65,11 +70,21 @@ const presetKepler: SceneState = (() => {
   const s = createDefaultScene();
   s.bodyCount = 3;
   s.bodies[0] = makeBody([0, 0, 0], [0, 0, 0], 20, 'blackHole');
-  s.bodies[1] = makeBody([10, 0, 0], [0, 0, 2.0], 0.5, 'neutronStar');
-  s.bodies[2] = makeBody([-14, 0, 0], [0, 0, -1.6], 0.5, 'neutronStar');
   s.dynamics = 'kepler';
   s.gmCentral = 120;
-  s.dt = 0.03;
+  s.dt = 0.02;
+  s.bodies[1] = makeBody(
+    [10, 0, 0],
+    [0, 0, 3.4635],
+    0.5,
+    'whiteHole',
+  );
+  s.bodies[2] = makeBody(
+    [-14, 0, 0],
+    [0, 0, -2.9274],
+    0.5,
+    'neutronStar',
+  );
   return s;
 })();
 
@@ -77,13 +92,28 @@ const presetNBody: SceneState = (() => {
   const s = createDefaultScene();
   s.bodyCount = 4;
   s.bodies[0] = makeBody([0, 0, 0], [0, 0, 0], 25, 'blackHole');
-  s.bodies[1] = makeBody([8, 2, 0], [-0.2, 0.1, 0.15], 3, 'whiteHole');
-  s.bodies[2] = makeBody([-6, -1, 3], [0.15, -0.05, -0.1], 2, 'neutronStar');
-  s.bodies[3] = makeBody([4, -8, -2], [0.05, 0.2, 0], 2, 'neutronStar');
   s.dynamics = 'nbody';
   s.nbodyG = 3;
   s.softening = 0.4;
-  s.dt = 0.015;
+  s.dt = 0.012;
+  s.bodies[1] = makeBody(
+    [8, 2, 0],
+    [0, 0.0395, -3.0102],
+    3,
+    'whiteHole',
+  );
+  s.bodies[2] = makeBody(
+    [-6, -1, 3],
+    [1.4832, 0.0307, 2.9664],
+    2,
+    'neutronStar',
+  );
+  s.bodies[3] = makeBody(
+    [4, -8, -2],
+    [-1.2563, -0.0419, -2.5650],
+    2,
+    'neutronStar',
+  );
   return s;
 })();
 

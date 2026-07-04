@@ -65,7 +65,7 @@ export function defaultBodyParams(kind: BodyKind): BodyParams {
     },
     neutronStar: {
       size: 0.4,
-      glowColor: '#ffc9a0',
+      glowColor: '#9fd8ff',
       glowIntensity: 2.2,
       adiskIntensity: 0.9,
       distortionStrength: 0.5,
