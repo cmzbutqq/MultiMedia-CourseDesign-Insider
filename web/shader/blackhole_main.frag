@@ -14,6 +14,8 @@ uniform float mouseY;
 
 uniform float time;
 uniform samplerCube galaxy;
+uniform sampler2D galaxyPanorama;
+uniform float galaxyMode;
 uniform sampler2D colorMap;
 
 uniform float frontView;
@@ -22,11 +24,15 @@ uniform float cameraRoll;
 uniform float playbackCamera;
 uniform vec3 playbackCameraPos;
 uniform vec3 cameraWorld;
+uniform vec3 cameraRight;
+uniform vec3 cameraUp;
+uniform vec3 cameraForward;
 
 uniform float gravatationalLensing;
 uniform float renderBlackHole;
 uniform float mouseControl;
 uniform float fovScale;
+uniform float traceMaxDistance;
 
 uniform float adiskEnabled;
 uniform float adiskParticle;
@@ -157,8 +163,17 @@ float ringDistance(vec3 rayOrigin, vec3 rayDir, Ring ring) {
 }
 
 vec3 panoramaColor(sampler2D tex, vec3 dir) {
-  vec2 puv = vec2(0.5 - atan(dir.z, dir.x) / PI * 0.5, 0.5 - asin(dir.y) / PI);
+  vec3 ndir = normalize(dir);
+  vec2 texSize = vec2(textureSize(tex, 0));
+  vec2 texel = vec2(0.0, texSize.y > 0.0 ? 0.5 / texSize.y : 0.0);
+  vec2 puv = vec2(
+      fract(0.5 - atan(ndir.z, ndir.x) / (2.0 * PI)),
+      clamp(acos(clamp(ndir.y, -1.0, 1.0)) / PI, texel.y, 1.0 - texel.y));
   return texture(tex, puv).rgb;
+}
+
+vec3 sampleGalaxy(vec3 dir) {
+  return galaxyMode > 0.5 ? panoramaColor(galaxyPanorama, dir) : texture(galaxy, dir).rgb;
 }
 
 vec3 accel(float h2, vec3 pos) {
@@ -382,11 +397,15 @@ vec3 traceColor(vec3 pos, vec3 dir) {
   float alpha = 1.0;
 
   float STEP_SIZE = 0.1;
+  float traveled = 0.0;
   dir *= STEP_SIZE;
 
   float bc = bodyCount;
 
   for (int i = 0; i < 300; i++) {
+    if (traveled >= traceMaxDistance) {
+      break;
+    }
     if (renderBlackHole > 0.5) {
       if (gravatationalLensing > 0.5) {
         vec3 acc = vec3(0.0);
@@ -442,46 +461,24 @@ vec3 traceColor(vec3 pos, vec3 dir) {
       }
     }
 
+    traveled += length(dir);
     pos += dir;
   }
 
   dir = rotateVector(dir, vec3(0.0, 1.0, 0.0), time);
-  color += texture(galaxy, dir).rgb * alpha;
+  color += sampleGalaxy(dir).rgb * alpha;
   return color;
 }
 
 void main() {
-  mat3 view;
-
-  vec3 cameraPos;
-  if (playbackCamera > 0.5) {
-    cameraPos = playbackCameraPos;
-  } else if (frontView > 0.5) {
-    cameraPos = vec3(10.0, 1.0, 10.0);
-  } else if (topView > 0.5) {
-    cameraPos = vec3(15.0, 15.0, 0.0);
-  } else if (mouseControl > 0.5) {
-    vec2 orbit = clamp(vec2(mouseX, mouseY) / resolution.xy, 0.0, 1.0);
-    float yaw = (orbit.x - 0.5) * PI * 2.0;
-    float pitch = (0.5 - orbit.y) * PI * 0.75;
-    float cosPitch = cos(pitch);
-    cameraPos = vec3(-cos(yaw) * cosPitch * 15.0,
-                     sin(pitch) * 15.0,
-                     sin(yaw) * cosPitch * 15.0);
-  } else {
-    cameraPos = vec3(-cos(time * 0.1) * 15.0, sin(time * 0.1) * 15.0,
-                     sin(time * 0.1) * 15.0);
-  }
-
-  vec3 target = vec3(0.0, 0.0, 0.0);
-  view = lookAt(cameraPos, target, radians(cameraRoll));
-
   vec2 puv = gl_FragCoord.xy / resolution.xy - vec2(0.5);
   puv.x *= resolution.x / resolution.y;
 
-  vec3 rayDir = normalize(vec3(-puv.x * fovScale, puv.y * fovScale, 1.0));
-  vec3 pos = cameraPos;
-  rayDir = view * rayDir;
+  vec3 rayDir = normalize(
+      cameraRight * (-puv.x * fovScale) +
+      cameraUp * (puv.y * fovScale) +
+      cameraForward);
+  vec3 pos = cameraWorld;
 
   fragColor.rgb = traceColor(pos, rayDir);
   fragColor.a = 1.0;
