@@ -15,6 +15,7 @@ const RENDER_BOOLEAN_FIELDS = [
   'tonemappingEnabled',
 ] as const;
 const RENDER_NUMBER_FIELDS = [
+  'cameraZoom',
   'adiskDensityV',
   'adiskDensityH',
   'adiskHeight',
@@ -31,7 +32,8 @@ const RENDER_NUMBER_FIELDS = [
   'gamma',
 ] as const;
 
-const RELATIVISTIC_RENDER_DEFAULTS = {
+const RENDER_STATE_DEFAULTS = {
+  cameraZoom: 1,
   dopplerEnabled: false,
   dopplerStrength: 1.0,
   dopplerBeta: 0.35,
@@ -149,6 +151,7 @@ function isRenderState(value: unknown): value is RecordingFrame['render'] {
     isNumberInRange(value.adiskDensityV, 0, 10) &&
     isNumberInRange(value.adiskDensityH, 0, 10) &&
     isNumberInRange(value.adiskHeight, 0, 1) &&
+    isNumberInRange(value.cameraZoom, 0.15, 2.4) &&
     isNumberInRange(value.adiskLit, 0, 4) &&
     isIntegerInRange(value.adiskNoiseLOD, 1, 12) &&
     isNumberInRange(value.adiskNoiseScale, 0, 10) &&
@@ -232,7 +235,7 @@ function parseRecordingFrames(data: unknown): RecordingFrame[] | null {
     return {
       ...frame,
       render: {
-        ...RELATIVISTIC_RENDER_DEFAULTS,
+        ...RENDER_STATE_DEFAULTS,
         ...frame.render,
       },
     };
@@ -263,6 +266,7 @@ function parseRecordingFrames(data: unknown): RecordingFrame[] | null {
     render: {
       gravatationalLensing: frame.render.gravatationalLensing,
       renderBlackHole: frame.render.renderBlackHole,
+      cameraZoom: frame.render.cameraZoom,
       adiskEnabled: frame.render.adiskEnabled,
       adiskParticle: frame.render.adiskParticle,
       adiskDensityV: frame.render.adiskDensityV,
@@ -312,6 +316,7 @@ export interface RecordingFrame {
   render: {
     gravatationalLensing: boolean;
     renderBlackHole: boolean;
+    cameraZoom: number;
     adiskEnabled: boolean;
     adiskParticle: boolean;
     adiskDensityV: number;
@@ -387,6 +392,7 @@ export class RecordingManager {
     params: {
       gravatationalLensing: boolean;
       renderBlackHole: boolean;
+      cameraZoom: number;
       adiskEnabled: boolean;
       adiskParticle: boolean;
       adiskDensityV: number;
@@ -437,6 +443,7 @@ export class RecordingManager {
       render: {
         gravatationalLensing: params.gravatationalLensing,
         renderBlackHole: params.renderBlackHole,
+        cameraZoom: params.cameraZoom,
         adiskEnabled: params.adiskEnabled,
         adiskParticle: params.adiskParticle,
         adiskDensityV: params.adiskDensityV,

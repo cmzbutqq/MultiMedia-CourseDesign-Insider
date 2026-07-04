@@ -1,6 +1,9 @@
 /** 与 blackhole_main.frag 中 main() 相机一致 */
 
 const PI = Math.PI;
+const ORBIT_RADIUS = 15;
+const ORBIT_YAW_RANGE = PI * 2.0;
+const ORBIT_PITCH_RANGE = PI * 0.75;
 
 function degToRad(d: number): number {
   return (d * PI) / 180;
@@ -31,9 +34,16 @@ export function getCameraLookBasis(
   } else if (topView) {
     cameraPos = [15, 15, 0];
   } else if (mouseControl) {
-    const mx = Math.max(0, Math.min(1, mouseX / resolutionX)) - 0.5;
-    const my = Math.max(0, Math.min(1, mouseY / resolutionY)) - 0.5;
-    cameraPos = [-Math.cos(mx * 10) * 15, my * 30, Math.sin(mx * 10) * 15];
+    const orbitX = Math.max(0, Math.min(1, mouseX / resolutionX));
+    const orbitY = Math.max(0, Math.min(1, mouseY / resolutionY));
+    const yaw = (orbitX - 0.5) * ORBIT_YAW_RANGE;
+    const pitch = (0.5 - orbitY) * ORBIT_PITCH_RANGE;
+    const cosPitch = Math.cos(pitch);
+    cameraPos = [
+      -Math.cos(yaw) * cosPitch * ORBIT_RADIUS,
+      Math.sin(pitch) * ORBIT_RADIUS,
+      Math.sin(yaw) * cosPitch * ORBIT_RADIUS,
+    ];
   } else {
     cameraPos = [
       -Math.cos(time * 0.1) * 15,

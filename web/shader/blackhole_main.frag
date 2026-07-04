@@ -461,9 +461,13 @@ void main() {
   } else if (topView > 0.5) {
     cameraPos = vec3(15.0, 15.0, 0.0);
   } else if (mouseControl > 0.5) {
-    vec2 mouse = clamp(vec2(mouseX, mouseY) / resolution.xy, 0.0, 1.0) - 0.5;
-    cameraPos = vec3(-cos(mouse.x * 10.0) * 15.0, mouse.y * 30.0,
-                     sin(mouse.x * 10.0) * 15.0);
+    vec2 orbit = clamp(vec2(mouseX, mouseY) / resolution.xy, 0.0, 1.0);
+    float yaw = (orbit.x - 0.5) * PI * 2.0;
+    float pitch = (0.5 - orbit.y) * PI * 0.75;
+    float cosPitch = cos(pitch);
+    cameraPos = vec3(-cos(yaw) * cosPitch * 15.0,
+                     sin(pitch) * 15.0,
+                     sin(yaw) * cosPitch * 15.0);
   } else {
     cameraPos = vec3(-cos(time * 0.1) * 15.0, sin(time * 0.1) * 15.0,
                      sin(time * 0.1) * 15.0);
