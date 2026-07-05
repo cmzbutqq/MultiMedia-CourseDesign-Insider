@@ -7,6 +7,7 @@ const mainTs = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
 const cameraTs = readFileSync(new URL('../src/camera.ts', import.meta.url), 'utf8');
 const recordingManagerTs = readFileSync(new URL('../src/recordingManager.ts', import.meta.url), 'utf8');
 const handGestureTs = readFileSync(new URL('../src/handGesture.ts', import.meta.url), 'utf8');
+const sceneTs = readFileSync(new URL('../src/scene.ts', import.meta.url), 'utf8');
 
 const relativisticFields = [
   'dopplerEnabled',
@@ -69,4 +70,16 @@ test('local gesture teardown stops camera tracks', () => {
   assert.match(handGestureTs, /stream\.getTracks\(\)\.forEach\(\(track\)\s*=>\s*track\.stop\(\)\)/);
   assert.match(handGestureTs, /this\.videoElement\.srcObject\s*=\s*null/);
   assert.match(handGestureTs, /destroy\(\):\s*void\s*{[\s\S]*?this\.stopVideoStream\(\)/);
+});
+
+test('dynamic ray marching keys off body surfaces and farthest-surface early stop', () => {
+  assert.match(sceneTs, /export\s+function\s+getBodySurfaceRadius\(body:\s*SceneBody\)/);
+  assert.match(sceneTs, /body\.kind\s*===\s*'blackHole'\s*\?\s*baseRadius\s*\*\s*12\s*:\s*baseRadius/);
+  assert.match(shader, /uniform\s+float\s+bodySurfaceRadius\[5\]\s*;/);
+  assert.match(shader, /nearestSurfaceDistance\s*=\s*min\(nearestSurfaceDistance,\s*d\s*-\s*max\(bodySurfaceRadius\[j\],\s*0\.01\)\)/);
+  assert.match(shader, /if\s*\(nearestSurfaceDistance\s*<\s*INF_TRACE\s*\*\s*0\.5\)\s*{\s*stepSize\s*=\s*max\(FIXED_STEP_SIZE,\s*nearestSurfaceDistance\s*\*\s*0\.5\)\s*;/);
+  assert.match(shader, /vec3\s+acc\s*=\s*totalLensingAccel\(lensSamplePos,\s*baseDir,\s*bc\)\s*\*\s*stepScale/);
+  assert.match(shader, /if\s*\(length\(pos\s*-\s*cameraWorld\)\s*>\s*traceMaxDistance\)\s*{/);
+  assert.match(mainTs, /const\s+surfacePointDistance\s*=\s*bodyDistance\s*\+\s*getBodySurfaceRadius\(body\)/);
+  assert.match(mainTs, /return\s+Math\.max\(TRACE_STOP_DISTANCE_MIN,\s*farthestSurfacePointDistance\s*\*\s*2\)/);
 });

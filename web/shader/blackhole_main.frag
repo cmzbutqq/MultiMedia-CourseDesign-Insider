@@ -51,6 +51,7 @@ uniform vec3 bodyCenter[5];
 uniform float bodyLensStrength[5];
 uniform float bodyKind[5];
 uniform float bodySize[5];
+uniform float bodySurfaceRadius[5];
 uniform vec3 glowColor[5];
 uniform float glowIntensity[5];
 uniform float adiskGain[5];
@@ -392,56 +393,70 @@ vec3 shadeInnerBody(int j, vec3 color, vec3 rel, vec3 dir) {
   }
 }
 
+vec3 totalLensingAccel(vec3 pos, vec3 baseDir, float bc) {
+  vec3 acc = vec3(0.0);
+  for (int j = 0; j < MAX_BODIES_I; j++) {
+    if (float(j) >= bc - 0.5) {
+      break;
+    }
+    vec3 rel = pos - bodyCenter[j];
+    vec3 hj = cross(rel, baseDir);
+    float h2j = dot(hj, hj);
+    float lensSign = bodyKind[j] > 0.5 && bodyKind[j] < 1.5 ? -1.0 : 1.0;
+    acc += accel(h2j, rel) * bodyLensStrength[j] * lensSign;
+  }
+  return acc;
+}
+
 vec3 traceColor(vec3 pos, vec3 dir) {
   vec3 color = vec3(0.0);
   float alpha = 1.0;
 
-  float STEP_SIZE = 0.1;
-  float traveled = 0.0;
-  dir *= STEP_SIZE;
+  const float FIXED_STEP_SIZE = 0.1;
+  vec3 rayDir = normalize(dir);
 
   float bc = bodyCount;
 
   for (int i = 0; i < 300; i++) {
-    if (traveled >= traceMaxDistance) {
+    if (length(pos - cameraWorld) > traceMaxDistance) {
       break;
     }
+    int hit = -1;
+    float bestD = 1.0e30;
+    float nearestSurfaceDistance = INF_TRACE;
+    for (int j = 0; j < MAX_BODIES_I; j++) {
+      if (float(j) >= bc - 0.5) {
+        break;
+      }
+      vec3 rel = pos - bodyCenter[j];
+      float d = length(rel);
+      float R = max(bodySize[j], 0.01);
+      nearestSurfaceDistance = min(nearestSurfaceDistance, d - max(bodySurfaceRadius[j], 0.01));
+      if (d < R) {
+        if (d < bestD) {
+          bestD = d;
+          hit = j;
+        }
+      }
+    }
+    if (hit >= 0) {
+      vec3 rel = pos - bodyCenter[hit];
+      return shadeInnerBody(hit, color, rel, rayDir);
+    }
+
+    float stepSize = FIXED_STEP_SIZE;
+    if (nearestSurfaceDistance < INF_TRACE * 0.5) {
+      stepSize = max(FIXED_STEP_SIZE, nearestSurfaceDistance * 0.5);
+    }
+    vec3 stepDir = rayDir * stepSize;
+
     if (renderBlackHole > 0.5) {
       if (gravatationalLensing > 0.5) {
-        vec3 acc = vec3(0.0);
-        for (int j = 0; j < MAX_BODIES_I; j++) {
-          if (float(j) >= bc - 0.5) {
-            break;
-          }
-          vec3 rel = pos - bodyCenter[j];
-          vec3 hj = cross(rel, dir);
-          float h2j = dot(hj, hj);
-          float lensSign = bodyKind[j] > 0.5 && bodyKind[j] < 1.5 ? -1.0 : 1.0;
-          acc += accel(h2j, rel) * bodyLensStrength[j] * lensSign;
-        }
-        dir += acc;
-      }
-
-      int hit = -1;
-      float bestD = 1.0e30;
-      for (int j = 0; j < MAX_BODIES_I; j++) {
-        if (float(j) >= bc - 0.5) {
-          break;
-        }
-        vec3 rel = pos - bodyCenter[j];
-        float r2 = dot(rel, rel);
-        float R = max(bodySize[j], 0.01);
-        if (r2 < R * R) {
-          float d = length(rel);
-          if (d < bestD) {
-            bestD = d;
-            hit = j;
-          }
-        }
-      }
-      if (hit >= 0) {
-        vec3 rel = pos - bodyCenter[hit];
-        return shadeInnerBody(hit, color, rel, dir);
+        vec3 baseDir = rayDir * FIXED_STEP_SIZE;
+        vec3 lensSamplePos = pos + stepDir * 0.5;
+        float stepScale = stepSize / FIXED_STEP_SIZE;
+        vec3 acc = totalLensingAccel(lensSamplePos, baseDir, bc) * stepScale;
+        stepDir += acc;
       }
 
       float minDistance = INF_TRACE;
@@ -453,7 +468,7 @@ vec3 traceColor(vec3 pos, vec3 dir) {
         ring.innerRadius = 2.0;
         ring.outerRadius = 6.0;
         ring.rotateSpeed = 0.08;
-        ringColor(pos, dir, ring, minDistance, color);
+        ringColor(pos, stepDir, ring, minDistance, color);
       } else {
         if (adiskEnabled > 0.5 && bc > 0.5) {
           adiskColor(pos, color, alpha);
@@ -461,12 +476,16 @@ vec3 traceColor(vec3 pos, vec3 dir) {
       }
     }
 
-    traveled += length(dir);
-    pos += dir;
+    float stepLength = length(stepDir);
+    if (stepLength <= EPSILON) {
+      break;
+    }
+    rayDir = stepDir / stepLength;
+    pos += stepDir;
   }
 
-  dir = rotateVector(dir, vec3(0.0, 1.0, 0.0), time);
-  color += sampleGalaxy(dir).rgb * alpha;
+  rayDir = rotateVector(rayDir, vec3(0.0, 1.0, 0.0), time);
+  color += sampleGalaxy(rayDir).rgb * alpha;
   return color;
 }
 

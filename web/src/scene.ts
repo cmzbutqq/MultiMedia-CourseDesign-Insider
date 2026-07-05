@@ -47,6 +47,11 @@ export interface SceneState {
   timeWarp: TimeWarpParams;
 }
 
+export function getBodySurfaceRadius(body: SceneBody): number {
+  const baseRadius = Math.max(body.visual.size, 0.01);
+  return body.kind === 'blackHole' ? baseRadius * 12 : baseRadius;
+}
+
 export function defaultBodyParams(kind: BodyKind): BodyParams {
   const base: Record<BodyKind, BodyParams> = {
     blackHole: {

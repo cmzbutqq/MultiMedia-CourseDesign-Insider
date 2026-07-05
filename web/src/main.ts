@@ -23,6 +23,7 @@ import {
   type SceneState,
   applySceneState,
   cloneSceneState,
+  getBodySurfaceRadius,
   normalizeSceneForNBody,
 } from './scene.js';
 import { stepScene, calculateTimeWarp } from './physics.js';
@@ -79,6 +80,8 @@ const MAX_CAMERA_DISTANCE = 50;
 const DEFAULT_CAMERA_FOV_DEG = 100;
 const MIN_CAMERA_FOV_DEG = 15;
 const MAX_CAMERA_FOV_DEG = 140;
+const TRACE_FIXED_STEP_SIZE = 0.1;
+const TRACE_STOP_DISTANCE_MIN = TRACE_FIXED_STEP_SIZE * 2;
 const DISTANCE_WHEEL_SENSITIVITY = 0.0015;
 const ORBIT_YAW_RANGE = Math.PI * 2.0;
 const ORBIT_PITCH_RANGE = Math.PI * 0.75;
@@ -488,6 +491,7 @@ function bindSceneUniforms(
     const nameL = `bodyLensStrength[${i}]`;
     const nameK = `bodyKind[${i}]`;
     const nameS = `bodySize[${i}]`;
+    const nameSr = `bodySurfaceRadius[${i}]`;
     const nameG = `glowColor[${i}]`;
     const nameGi = `glowIntensity[${i}]`;
     const nameA = `adiskGain[${i}]`;
@@ -497,6 +501,7 @@ function bindSceneUniforms(
       setF(gl, p.program, p.uniforms, nameL, lens);
       setF(gl, p.program, p.uniforms, nameK, bodyKindShaderValue(b.kind));
       setF(gl, p.program, p.uniforms, nameS, b.visual.size);
+      setF(gl, p.program, p.uniforms, nameSr, getBodySurfaceRadius(b));
       const [cr, cg, cb] = parseHexColorRgb(b.visual.glowColor);
       setV3(gl, p.program, p.uniforms, nameG, cr, cg, cb);
       setF(gl, p.program, p.uniforms, nameGi, b.visual.glowIntensity);
@@ -506,6 +511,7 @@ function bindSceneUniforms(
       setF(gl, p.program, p.uniforms, nameL, 0);
       setF(gl, p.program, p.uniforms, nameK, 0);
       setF(gl, p.program, p.uniforms, nameS, 0.001);
+      setF(gl, p.program, p.uniforms, nameSr, 0.001);
       setV3(gl, p.program, p.uniforms, nameG, 0, 0, 0);
       setF(gl, p.program, p.uniforms, nameGi, 0);
       setF(gl, p.program, p.uniforms, nameA, 0);
@@ -1455,17 +1461,17 @@ async function main(): Promise<void> {
   }
 
   function computeTraceMaxDistance(cameraPos: [number, number, number]): number {
-    let farthestDistance = params.cameraDistance + 20;
+    let farthestSurfacePointDistance = -Infinity;
     for (let i = 0; i < scene.bodyCount; i++) {
       const body = scene.bodies[i]!;
       const dx = body.position[0] - cameraPos[0];
       const dy = body.position[1] - cameraPos[1];
       const dz = body.position[2] - cameraPos[2];
       const bodyDistance = Math.hypot(dx, dy, dz);
-      const margin = 12 + body.visual.size * 12;
-      farthestDistance = Math.max(farthestDistance, bodyDistance + margin);
+      const surfacePointDistance = bodyDistance + getBodySurfaceRadius(body);
+      farthestSurfacePointDistance = Math.max(farthestSurfacePointDistance, surfacePointDistance);
     }
-    return clampNumber(farthestDistance, 40, 200);
+    return Math.max(TRACE_STOP_DISTANCE_MIN, farthestSurfacePointDistance * 2);
   }
 
   function syncRenderSummary(): void {
