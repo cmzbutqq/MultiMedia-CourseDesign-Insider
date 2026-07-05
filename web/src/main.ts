@@ -1602,7 +1602,7 @@ async function main(): Promise<void> {
     });
 
   const simulationFolder = sceneFolder.addFolder('物理参数');
-  const dynamicsCtrl = simulationFolder
+  const dynamicsCtrl = sceneFolder
     .add(uiScene, 'dynamics', { 静态: 'static', 开普勒: 'kepler', 'N 体': 'nbody' })
     .name('动力学')
     .onChange((v: SceneState['dynamics']) => {
@@ -1613,25 +1613,25 @@ async function main(): Promise<void> {
       trails.reset();
       refreshGuiDisplays();
     });
-  const gmCentralCtrl = simulationFolder
+  const gmCentralCtrl = sceneFolder
     .add(uiScene, 'gmCentral', 1, 500)
     .name('中心 GM')
     .onChange((v: number) => {
       scene.gmCentral = v;
     });
-  const nbodyGCtrl = simulationFolder
+  const nbodyGCtrl = sceneFolder
     .add(uiScene, 'nbodyG', 0.1, 20)
     .name('N 体引力')
     .onChange((v: number) => {
       scene.nbodyG = v;
     });
-  const softeningCtrl = simulationFolder
+  const softeningCtrl = sceneFolder
     .add(uiScene, 'softening', 0.01, 2)
     .name('软化半径')
     .onChange((v: number) => {
       scene.softening = v;
     });
-  simulationFolder
+  sceneFolder
     .add(uiScene, 'dt', 0.001, 0.1, 0.001)
     .name('时间步长')
     .onChange((v: number) => {
@@ -1639,26 +1639,26 @@ async function main(): Promise<void> {
     });
 
   const timeWarpFolder = simulationFolder.addFolder('时间扭曲');
-  const timeWarpEnabledCtrl = timeWarpFolder
+  const timeWarpEnabledCtrl = sceneFolder
     .add(uiScene, 'timeWarpEnabled')
     .name('启用')
     .onChange((v: boolean) => {
       scene.timeWarp.enabled = v;
       refreshGuiLayout();
     });
-  const timeWarpIntensityCtrl = timeWarpFolder
+  const timeWarpIntensityCtrl = sceneFolder
     .add(uiScene, 'timeWarpIntensity', 0, 1, 0.01)
     .name('强度')
     .onChange((v: number) => {
       scene.timeWarp.intensity = v;
     });
-  const timeWarpPotentialScaleCtrl = timeWarpFolder
+  const timeWarpPotentialScaleCtrl = sceneFolder
     .add(uiScene, 'timeWarpPotentialScale', 0.1, 5, 0.1)
     .name('势阱强度')
     .onChange((v: number) => {
       scene.timeWarp.potentialScale = v;
     });
-  const timeWarpDistanceScaleCtrl = timeWarpFolder
+  const timeWarpDistanceScaleCtrl = sceneFolder
     .add(uiScene, 'timeWarpDistanceScale', 0.5, 20, 0.5)
     .name('距离参考')
     .onChange((v: number) => {
@@ -1666,7 +1666,7 @@ async function main(): Promise<void> {
     });
 
   const interactionFolder = gui.addFolder('高级交互');
-  const gestureModeCtrl = interactionFolder
+  const gestureModeCtrl = commonFolder
     .add(params, 'gestureMode', {
       关闭: 'off',
       本地识别: 'local',
@@ -1720,21 +1720,21 @@ async function main(): Promise<void> {
         console.error('[blackhole-web] 手势模式切换错误:', error);
       });
   });
-  cameraRollCtrl = interactionFolder
+  cameraRollCtrl = commonFolder
     .add(params, 'cameraRoll', -180, 180, 1)
     .name('画面滚转');
 
   const renderFolder = gui.addFolder('画面与特效');
 
   const resolutionFolder = renderFolder.addFolder('渲染分辨率');
-  resolutionFolder
+  renderFolder
     .add(params, 'renderScale', MIN_RENDER_SCALE, MAX_RENDER_SCALE, 0.05)
     .name('渲染倍率')
     .onChange(() => {
       scheduleResizeNow('gui-render-scale');
       refreshGuiDisplays();
     });
-  const upscaleModeCtrl = resolutionFolder
+  const upscaleModeCtrl = renderFolder
     .add(params, 'upscaleMode', {
       FSR1: 'fsr1',
       Lanczos: 'lanczos',
@@ -1744,23 +1744,23 @@ async function main(): Promise<void> {
     .onChange(() => {
       refreshGuiLayout();
     });
-  const fsrSharpnessCtrl = resolutionFolder
+  const fsrSharpnessCtrl = renderFolder
     .add(params, 'fsrSharpness', 0, 2, 0.05)
     .name('FSR 锐化')
     .onChange(() => {
       setF(gl, passes.fsrRcas.program, passes.fsrRcas.uniforms, 'sharpnessStops', params.fsrSharpness);
     });
-  resolutionFolder
+  renderFolder
     .add(renderState, 'internalResolution')
     .name('内部尺寸')
     .listen();
-  resolutionFolder
+  renderFolder
     .add(renderState, 'displayResolution')
     .name('画布尺寸')
     .listen();
 
   const antiAliasFolder = renderFolder.addFolder('抗锯齿');
-  resolutionFolder
+  renderFolder
     .add(params, 'frameRateLimit', 0, MAX_FRAME_RATE_LIMIT, 1)
     .name('FPS Cap')
     .onChange((value: number) => {
@@ -1768,14 +1768,14 @@ async function main(): Promise<void> {
     });
 
   const backgroundFolder = renderFolder.addFolder('Background');
-  backgroundFolder
+  renderFolder
     .add(params, 'skyboxPreset', skyboxOptions)
     .name('Skybox')
     .onChange(() => {
       syncSkyboxTexture();
     });
 
-  const antialiasCtrl = antiAliasFolder
+  const antialiasCtrl = renderFolder
     .add(params, 'antialias', {
       关闭: 'off',
       '快速平滑 (FXAA)': 'fxaa',
@@ -1786,7 +1786,7 @@ async function main(): Promise<void> {
       updateAAUIControls(v);
       scheduleResizeNow('gui-antialias');
     });
-  const fxaaQualityCtrl = antiAliasFolder
+  const fxaaQualityCtrl = renderFolder
     .add(params, 'fxaaQuality', {
       低: 0,
       中: 1,
@@ -1798,7 +1798,7 @@ async function main(): Promise<void> {
         setI1(gl, passes.fxaa.program, passes.fxaa.uniforms, 'fxaaQuality', params.fxaaQuality);
       }
     });
-  const msaaSamplesCtrl = antiAliasFolder
+  const msaaSamplesCtrl = renderFolder
     .add(params, 'msaaSamples', {
       '2x': 2,
       '4x': 4,
@@ -1808,7 +1808,7 @@ async function main(): Promise<void> {
     .onChange(() => {
       scheduleResizeNow('gui-msaa');
     });
-  const taaFeedbackCtrl = antiAliasFolder
+  const taaFeedbackCtrl = renderFolder
     .add(params, 'taaFeedback', 1, 20, 0.5)
     .name('TAA 反馈')
     .onChange(() => {
@@ -1821,6 +1821,8 @@ async function main(): Promise<void> {
     setGuiVisible(msaaSamplesCtrl, mode === 'taa');
     setGuiVisible(taaFeedbackCtrl, mode === 'taa');
   };
+  renderFolder.add(params, 'gravatationalLensing').name('Lensing');
+  renderFolder.add(params, 'renderBlackHole').name('Show Core');
 
   const lensFolder = renderFolder.addFolder('黑洞主体');
   lensFolder.add(params, 'gravatationalLensing').name('引力透镜');
@@ -1891,16 +1893,16 @@ async function main(): Promise<void> {
     .name('自旋参数 a');
 
   const postFolder = renderFolder.addFolder('后期处理');
-  postFolder
+  renderFolder
     .add(params, 'bloomIterations', 1, MAX_BLOOM_ITER, 1)
     .name('Bloom 层数');
-  postFolder
+  renderFolder
     .add(params, 'bloomStrength', 0, 1, 0.01)
     .name('Bloom 强度');
-  postFolder
+  renderFolder
     .add(params, 'tonemappingEnabled')
     .name('色调映射');
-  postFolder
+  renderFolder
     .add(params, 'gamma', 1, 4, 0.05)
     .name('Gamma');
 
@@ -1910,7 +1912,7 @@ async function main(): Promise<void> {
   recordingFolder.add(recordingState, 'durationLabel').name('时长').listen();
 
   const recordingCaptureFolder = recordingFolder.addFolder('录制');
-  const startRecordingCtrl = recordingCaptureFolder
+  const startRecordingCtrl = recordingFolder
     .add(
       {
         startRecording() {
@@ -1923,7 +1925,7 @@ async function main(): Promise<void> {
       'startRecording',
     )
     .name('开始录制');
-  const stopRecordingCtrl = recordingCaptureFolder
+  const stopRecordingCtrl = recordingFolder
     .add(
       {
         stopRecording() {
@@ -1939,7 +1941,7 @@ async function main(): Promise<void> {
   addGuiClass(startRecordingCtrl, 'blackhole-gui-accent-action');
 
   const recordingPlaybackFolder = recordingFolder.addFolder('回放');
-  const startPlaybackCtrl = recordingPlaybackFolder
+  const startPlaybackCtrl = recordingFolder
     .add(
       {
         startPlayback() {
@@ -1955,7 +1957,7 @@ async function main(): Promise<void> {
       'startPlayback',
     )
     .name('开始回放');
-  const stopPlaybackCtrl = recordingPlaybackFolder
+  const stopPlaybackCtrl = recordingFolder
     .add(
       {
         stopPlayback() {
@@ -1968,7 +1970,7 @@ async function main(): Promise<void> {
       'stopPlayback',
     )
     .name('停止回放');
-  const playbackProgressCtrl = recordingPlaybackFolder
+  const playbackProgressCtrl = recordingFolder
     .add(recordingState, 'playbackProgress', 0, 1, 0.01)
     .name('回放进度')
     .listen()
@@ -1977,7 +1979,7 @@ async function main(): Promise<void> {
     });
 
   const recordingFileFolder = recordingFolder.addFolder('导入 / 导出');
-  const exportJsonCtrl = recordingFileFolder
+  const exportJsonCtrl = recordingFolder
     .add(
       {
         exportJSON() {
@@ -1997,7 +1999,7 @@ async function main(): Promise<void> {
       'exportJSON',
     )
     .name('导出 JSON');
-  recordingFileFolder
+  recordingFolder
     .add(
       {
         importJSON() {
@@ -2034,7 +2036,7 @@ async function main(): Promise<void> {
     .name('导入 JSON');
 
   const recordingStorageFolder = recordingFolder.addFolder('本地保存');
-  const saveLocalCtrl = recordingStorageFolder
+  const saveLocalCtrl = recordingFolder
     .add(
       {
         saveToLocalStorage() {
@@ -2048,7 +2050,7 @@ async function main(): Promise<void> {
       'saveToLocalStorage',
     )
     .name('保存到本地');
-  recordingStorageFolder
+  recordingFolder
     .add(
       {
         loadFromLocalStorage() {
@@ -2181,6 +2183,18 @@ async function main(): Promise<void> {
   cameraModeCtrl?.updateDisplay();
   antialiasCtrl.updateDisplay();
   audioEnabledCtrl.updateDisplay();
+  setGuiVisible(simulationFolder, false);
+  setGuiVisible(timeWarpFolder, false);
+  setGuiVisible(interactionFolder, false);
+  setGuiVisible(resolutionFolder, false);
+  setGuiVisible(antiAliasFolder, false);
+  setGuiVisible(backgroundFolder, false);
+  setGuiVisible(lensFolder, false);
+  setGuiVisible(postFolder, false);
+  setGuiVisible(recordingCaptureFolder, false);
+  setGuiVisible(recordingPlaybackFolder, false);
+  setGuiVisible(recordingFileFolder, false);
+  setGuiVisible(recordingStorageFolder, false);
   sceneFolder.close();
   interactionFolder.close();
   renderFolder.close();

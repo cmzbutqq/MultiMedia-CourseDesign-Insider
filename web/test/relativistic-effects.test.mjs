@@ -59,7 +59,7 @@ test('recording render state preserves relativistic visual parameters', () => {
 });
 
 test('gesture init failure rolls GUI state back to off', () => {
-  assert.match(mainTs, /const\s+gestureModeCtrl\s*=\s*interactionFolder\s*[\s\S]*?\.add\(params,\s*['"]gestureMode['"]/);
+  assert.match(mainTs, /const\s+gestureModeCtrl\s*=\s*(?:commonFolder|interactionFolder)\s*[\s\S]*?\.add\(params,\s*['"]gestureMode['"]/);
   assert.match(mainTs, /if\s*\(!success\)\s*{[\s\S]*?params\.gestureMode\s*=\s*['"]off['"][\s\S]*?refreshGuiDisplays\(\)/);
   assert.match(mainTs, /if\s*\(!success\)\s*{[\s\S]*?showGestureStatusMessage\([\s\S]*?,\s*true\s*\)/);
   assert.match(mainTs, /function\s+updateViewControlDisplays\(\)/);
