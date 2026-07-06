@@ -1,114 +1,118 @@
 # 多媒体课程作业
 
-基于 `WebGL2 + TypeScript + Vite` 的黑洞可视化课程项目，目标是在 Web 端复现黑洞、吸积盘、背景星空与后处理效果，并提供可交互的参数调节能力，便于展示、实验和后续扩展。
+基于 `WebGL2 + TypeScript + Vite` 的黑洞可视化课程项目，当前仓库已包含浏览器前端、可选的服务端手势识别、Docker 联调方案，以及 GitHub Actions 的测试与部署流程。
 
-## Features
+## 当前能力
 
-- 基于 `WebGL2` 的实时黑洞场景渲染
-- 支持吸积盘、引力透镜等视觉效果调节
-- 集成 Bloom、Tonemapping、Gamma 等后处理链路
-- 抗锯齿管线（关闭 / FXAA / TAA 三档切换，支持质量参数调节）
-- 手势交互（本地 MediaPipe / 服务器双模式）
-- 通过 `lil-gui` 实时修改渲染参数
-- 提供本地开发与 Docker 容器化运行方式
-- 预留多天体、模拟时间扭曲等拓展方向
+- 黑洞、白洞、中子星三类天体，最多 `5` 个活跃天体
+- `单天体 / 双天体 / 开普勒演示 / N体演示` 四组场景预设
+- 吸积盘、引力透镜、Bloom、Tonemapping、Gamma 等画面特效
+- `off / FXAA / TAA` 抗锯齿，以及 `FSR1 / Lanczos / Bicubic` 上采样
+- 时间扭曲、轨迹显示、相机模式切换、天体参数实时编辑
+- 录制、回放、JSON 导入导出、本地保存
+- 本地识别与服务器识别两种手势模式
+- 氛围音频
+- Docker 一体部署、GitHub Pages 静态部署、GitHub Actions CI
 
-## Tech Stack
+## 手势模式说明
 
-- `WebGL2`
-- `TypeScript`
-- `Vite`
-- `lil-gui`
-- `Docker`
-- `Nginx`
+- `本地识别`：浏览器直接调用 MediaPipe Hands
+- `服务器识别`：前端请求 `server/` 中的 Python 服务
+- 两种模式当前都只使用“手掌位置 + 张开手掌状态”驱动视角，不包含独立的 `pinch / rotate / drag` 分类
 
-## Quick Start
+## 快速开始
 
-### 本地运行
-
-进入 `web` 目录并安装依赖：
+### 仅运行前端
 
 ```bash
 cd web
 npm install
-```
-
-启动开发服务器：
-
-```bash
 npm run dev
 ```
 
-默认访问地址：
+默认地址：`http://localhost:5174`
 
-- [http://localhost:5174](http://localhost:5174)
-
-构建生产版本：
+需要稳定的摄像头安全上下文时，可改用：
 
 ```bash
-npm run build
+cd web
+./start-https.sh
 ```
 
-### Docker 运行
+地址：`https://localhost:5174`
 
-项目根目录的 `docker-compose.yml` 可一键部署前后端：
+### 启用服务器识别
+
+推荐先启动服务端，再在页面中选择 `常用操作 -> 手势识别 -> 服务器识别`。
+
+方式一：本地虚拟环境
 
 ```bash
-# 一键部署前后端（前台运行）
-docker compose up --build
-
-# 一键部署前后端（后台运行）
-docker compose up --build -d
+cd server
+./start-server.sh
 ```
 
-访问：
+方式二：Docker 一体部署
 
-- http前端：[http://localhost:8080](http://localhost:8080) (http可能无法调用摄像头)
-- https前端：[https://localhost:8443](https://localhost:8443)
-- 手势服务器：由前端容器通过内部网络代理，不再直接暴露 5000 端口
+```bash
+docker compose -p blackhole-web up --build
+```
+
+访问地址：
+
+- `http://localhost:8080`
+- `https://localhost:8443`
+
+说明：
+
+- 当前仓库目录名包含非 ASCII 字符，根目录运行 `docker compose` 时建议显式传 `-p blackhole-web`
+- 根目录 Compose 会把 `/health` 和 `/api/detect` 代理到内部服务端容器，不直接暴露宿主机 `5000` 端口
 
 停止容器：
 
 ```bash
-docker compose down
+docker compose -p blackhole-web down
 ```
 
-## Project Structure
+## 测试与构建
+
+前端：
+
+```bash
+cd web
+npm test
+npm run build
+```
+
+服务端：
+
+```bash
+python -m unittest discover -s server/tests -p 'test_*.py'
+```
+
+## 自动化
+
+- `.github/workflows/ci.yml`：在 PR 上执行前端测试、前端构建、服务端单测
+- `.github/workflows/deploy-pages.yml`：在 `main` 分支推送后构建 `web/dist` 并部署到 GitHub Pages
+
+说明：
+
+- GitHub Pages 只部署静态前端，不包含 `server/` 服务
+- Pages 环境下如需手势交互，应使用 `本地识别`，或自行部署服务端后再接入
+
+## 目录
 
 ```text
 .
-├── web/                     # Web 端主项目（Vite + TypeScript + WebGL2）
-├── server/                  # 手势识别服务端（Python + MediaPipe）
-├── docs/                    # 设计与实施过程文档
-├── docker-compose.yml       # Docker 容器编排配置（前后端一键部署）
-└── 拓展功能.md               # 后续功能拓展方向记录
+├── web/                  # Web 前端（Vite + TypeScript + WebGL2）
+├── server/               # 可选手势识别服务（Flask + MediaPipe）
+├── .github/workflows/    # CI 与 GitHub Pages 部署
+├── docker-compose.yml    # 前后端一体部署
+└── THIRD_PARTY_NOTICES.md
 ```
-- Docker 方案同时覆盖开发态与生产态，便于本地调试和演示部署
 
-## Roadmap
+## 文档
 
-后续可继续扩展的方向见 `拓展功能.md`，当前已整理的方向包括：
-
-- 更多天体类型
-- 多天体与简易轨道
-- 进阶视觉物理感
-- 模拟时间扭曲
-- 在线演示与网站部署
-
-**已实现：**
-
-- 抗锯齿（关闭 / FXAA / TAA 三档切换）
-- 摄像头手势交互（本地 + 服务器双模式）
-  - 张开手掌：检测到至少4根手指伸展，用于触发视角移动
-  - 捏合 (Pinch)：待多星系统开发后实现
-  - 拖拽 (Drag)：移动手掌位置来控制视角
-
-
-## License
-
-## Upstream Reference
-
-This project references ideas and source study from `rossning92/Blackhole`.
-See [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) for the attribution note used in this repository.
-
-当前仓库主要用于课程作业与学习研究。
+- [server/README.md](server/README.md)：服务端接口、启动方式、限制与联调说明
+- [web/HTTPS_SETUP.md](web/HTTPS_SETUP.md)：HTTPS、本地证书与摄像头权限说明
+- [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)：上游参考与归因说明
