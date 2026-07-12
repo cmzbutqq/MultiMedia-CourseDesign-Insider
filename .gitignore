@@ -59,3 +59,7 @@ Trashes
 *.tmp
 *.temp
 .cache/
+
+# Demo videos are distributed through GitHub Releases
+vids/demo初版.mp4
+vids/demo二版.mp4

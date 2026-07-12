@@ -107,12 +107,10 @@ python -m unittest discover -s server/tests -p 'test_*.py'
 ├── web/                  # Web 前端（Vite + TypeScript + WebGL2）
 ├── server/               # 可选手势识别服务（Flask + MediaPipe）
 ├── .github/workflows/    # CI 与 GitHub Pages 部署
-├── docker-compose.yml    # 前后端一体部署
-└── THIRD_PARTY_NOTICES.md
+└── docker-compose.yml    # 前后端一体部署
 ```
 
 ## 文档
 
 - [server/README.md](server/README.md)：服务端接口、启动方式、限制与联调说明
 - [web/HTTPS_SETUP.md](web/HTTPS_SETUP.md)：HTTPS、本地证书与摄像头权限说明
-- [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)：上游参考与归因说明
